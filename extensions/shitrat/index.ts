@@ -59,6 +59,7 @@ export default function shitratExtension(pi: ExtensionAPI) {
         "installations",
         "status skillrecordings/migrate-egghead",
         "commit-file skillrecordings/migrate-egghead --branch main --message 'message' --file path --dry-run",
+        "commit-files skillrecordings/migrate-egghead --branch main --message 'message' --file path --file other --dry-run",
       ]
       const filtered = items.filter((item) => item.startsWith(prefix))
       return filtered.map((value) => ({ value, label: value }))
@@ -156,6 +157,53 @@ export default function shitratExtension(pi: ExtensionAPI) {
         params.file,
       ]
       if (params.path) args.push("--path", params.path)
+      if (params.createBranchFrom) args.push("--create-branch-from", params.createBranchFrom)
+      if (params.dryRun) args.push("--dry-run")
+
+      const result = await runShitRat(pi, args, signal, params.cwd ?? ctx.cwd)
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        details: result,
+      }
+    },
+  })
+
+  pi.registerTool({
+    name: "shitrat_commit_files",
+    label: "ShitRat Commit Files",
+    description: "Atomically commit multiple local files to GitHub as shitratgit[bot].",
+    promptSnippet: "Commit multiple local files atomically to GitHub as shitratgit[bot] via the ShitRat GitHub App",
+    promptGuidelines: [
+      "Use shitrat_commit_files when Joel wants a small multi-file GitHub API commit authored by ShitRat's GitHub App identity.",
+      "Prefer dryRun: true first unless the user explicitly asked to write the commit.",
+      "Use normal git for large or complex changes; shitrat_commit_files is for small intentional batches.",
+    ],
+    parameters: Type.Object({
+      repo: Type.String({ description: "Repository in owner/repo form" }),
+      branch: Type.Optional(Type.String({ description: "Target branch; defaults to main" })),
+      message: Type.String({ description: "Git commit message" }),
+      files: Type.Array(Type.String({ description: "Local file to include" }), {
+        description: "Local files to commit; each must be inside cwd",
+        minItems: 1,
+      }),
+      createBranchFrom: Type.Optional(
+        Type.String({ description: "Create branch from this existing branch if missing" }),
+      ),
+      dryRun: Type.Optional(Type.Boolean({ description: "Preview without writing to GitHub" })),
+      cwd: Type.Optional(
+        Type.String({ description: "Working directory to resolve relative file paths; defaults to current pi cwd" }),
+      ),
+    }),
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const args = [
+        "commit-files",
+        params.repo,
+        "--branch",
+        params.branch ?? "main",
+        "--message",
+        params.message,
+      ]
+      for (const file of params.files) args.push("--file", file)
       if (params.createBranchFrom) args.push("--create-branch-from", params.createBranchFrom)
       if (params.dryRun) args.push("--dry-run")
 

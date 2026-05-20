@@ -1,4 +1,6 @@
 import { Octokit } from "@octokit/rest"
+
+export type GitHubOctokit = Octokit
 import { Effect } from "effect"
 import { createSign } from "node:crypto"
 import { readOptionalSecret, readSecret } from "./secrets.js"

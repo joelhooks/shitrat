@@ -1,8 +1,15 @@
 import { Args, Command, Options } from "@effect/cli"
 import { Console, Effect, Option } from "effect"
 import { createHash } from "node:crypto"
+import { lstat } from "node:fs/promises"
 import path from "node:path"
-import { createRepoOctokit, listInstallations, parseRepo, resolveInstallationId } from "../github-app.js"
+import {
+  createRepoOctokit,
+  listInstallations,
+  parseRepo,
+  resolveInstallationId,
+  type GitHubOctokit,
+} from "../github-app.js"
 import { errorMessage, failure, json, success, type NextAction } from "../response.js"
 
 const repoArg = Args.text({ name: "repo" }).pipe(
@@ -44,6 +51,11 @@ const fileOption = Options.text("file").pipe(
 const repoPathOption = Options.text("path").pipe(
   Options.withDescription("Target file path in the GitHub repository; defaults to --file relative to cwd"),
   Options.optional,
+)
+
+const filesOption = Options.text("file").pipe(
+  Options.withDescription("Local file to include in an atomic multi-file commit; repeat for each file"),
+  Options.repeated,
 )
 
 const createBranchFromOption = Options.text("create-branch-from").pipe(
@@ -116,6 +128,9 @@ const deriveRepoPath = (file: string, explicitPath: Option.Option<string>): stri
   return normalizeRepoPath(relative)
 }
 
+const MAX_COMMIT_FILE_BYTES = 5 * 1024 * 1024
+const MAX_COMMIT_BATCH_BYTES = 10 * 1024 * 1024
+
 interface PreparedCommitFile {
   readonly localPath: string
   readonly repoPath: string
@@ -131,12 +146,21 @@ const prepareCommitFile = (
   Effect.tryPromise({
     try: async () => {
       const localPath = path.resolve(file)
+      const repoPath = deriveRepoPath(file, explicitPath)
+      const info = await lstat(localPath).catch(() => undefined)
+      if (!info) throw new Error(`Local file not found: ${file}`)
+      if (info.isSymbolicLink()) throw new Error(`Refusing to commit symlink: ${file}`)
+      if (!info.isFile()) throw new Error(`Refusing to commit non-file path: ${file}`)
+      if (info.size > MAX_COMMIT_FILE_BYTES) {
+        throw new Error(
+          `File '${file}' is ${info.size} bytes; commit-file is capped at ${MAX_COMMIT_FILE_BYTES} bytes. Use normal git for large artifacts.`,
+        )
+      }
       const source = Bun.file(localPath)
-      if (!(await source.exists())) throw new Error(`Local file not found: ${file}`)
       const bytes = Buffer.from(await source.arrayBuffer())
       return {
         localPath,
-        repoPath: deriveRepoPath(file, explicitPath),
+        repoPath,
         size: bytes.length,
         sha256: createHash("sha256").update(bytes).digest("hex"),
         base64: bytes.toString("base64"),
@@ -177,6 +201,158 @@ const normalizeGitRef = (value: string): string => {
   }
   if (trimmed.startsWith("heads/")) return validateBranchName(trimmed.slice("heads/".length))
   return validateBranchName(trimmed)
+}
+
+interface BranchHead {
+  readonly headSha: string
+  readonly createdBranch: boolean
+}
+
+interface CommitBranchBase {
+  readonly headSha: string
+  readonly branchExists: boolean
+}
+
+const ensureBranch = (
+  octokit: GitHubOctokit,
+  repoRef: ReturnType<typeof parseRepo>,
+  targetBranch: string,
+  createBranchFrom: Option.Option<string>,
+): Effect.Effect<BranchHead, Error> =>
+  Effect.tryPromise({
+    try: async () => {
+      try {
+        const branch = await octokit.rest.repos.getBranch({
+          owner: repoRef.owner,
+          repo: repoRef.repo,
+          branch: targetBranch,
+        })
+        return { headSha: branch.data.commit.sha, createdBranch: false }
+      } catch (error) {
+        if (!isNotFoundError(error)) throw error
+
+        const base = optionToUndefined(createBranchFrom)
+        if (!base) {
+          throw new Error(
+            `Branch '${targetBranch}' does not exist. Pass --create-branch-from <base-branch> to create it.`,
+          )
+        }
+
+        const baseBranch = normalizeGitRef(base)
+        const baseRef = await octokit.rest.git.getRef({
+          owner: repoRef.owner,
+          repo: repoRef.repo,
+          ref: `heads/${baseBranch}`,
+        })
+
+        try {
+          await octokit.rest.git.createRef({
+            owner: repoRef.owner,
+            repo: repoRef.repo,
+            ref: `refs/heads/${targetBranch}`,
+            sha: baseRef.data.object.sha,
+          })
+          return { headSha: baseRef.data.object.sha, createdBranch: true }
+        } catch (createError) {
+          if (!isAlreadyExistsError(createError)) throw createError
+          const branch = await octokit.rest.repos.getBranch({
+            owner: repoRef.owner,
+            repo: repoRef.repo,
+            branch: targetBranch,
+          })
+          return { headSha: branch.data.commit.sha, createdBranch: false }
+        }
+      }
+    },
+    catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+  })
+
+const resolveBranchBase = (
+  octokit: GitHubOctokit,
+  repoRef: ReturnType<typeof parseRepo>,
+  targetBranch: string,
+  createBranchFrom: Option.Option<string>,
+): Effect.Effect<CommitBranchBase, Error> =>
+  Effect.tryPromise({
+    try: async () => {
+      try {
+        const branch = await octokit.rest.repos.getBranch({
+          owner: repoRef.owner,
+          repo: repoRef.repo,
+          branch: targetBranch,
+        })
+        return { headSha: branch.data.commit.sha, branchExists: true }
+      } catch (error) {
+        if (!isNotFoundError(error)) throw error
+
+        const base = optionToUndefined(createBranchFrom)
+        if (!base) {
+          throw new Error(
+            `Branch '${targetBranch}' does not exist. Pass --create-branch-from <base-branch> to create it.`,
+          )
+        }
+
+        const baseBranch = normalizeGitRef(base)
+        const baseRef = await octokit.rest.git.getRef({
+          owner: repoRef.owner,
+          repo: repoRef.repo,
+          ref: `heads/${baseBranch}`,
+        })
+        return { headSha: baseRef.data.object.sha, branchExists: false }
+      }
+    },
+    catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+  })
+
+const findDuplicateRepoPath = (files: readonly PreparedCommitFile[]): string | undefined => {
+  const seen = new Set<string>()
+  for (const file of files) {
+    if (seen.has(file.repoPath)) return file.repoPath
+    seen.add(file.repoPath)
+  }
+  return undefined
+}
+
+const preflightRepoPath = async (
+  octokit: GitHubOctokit,
+  repoRef: ReturnType<typeof parseRepo>,
+  ref: string,
+  repoPath: string,
+): Promise<void> => {
+  const parts = repoPath.split("/")
+  for (let index = 0; index < parts.length; index += 1) {
+    const candidate = parts.slice(0, index + 1).join("/")
+    const isLeaf = index === parts.length - 1
+    try {
+      const existing = await octokit.rest.repos.getContent({
+        owner: repoRef.owner,
+        repo: repoRef.repo,
+        path: candidate,
+        ref,
+      })
+
+      if (!isLeaf) {
+        if (!Array.isArray(existing.data)) {
+          throw new Error(
+            `Repository parent path '${candidate}' exists but is not a directory.`,
+          )
+        }
+        continue
+      }
+
+      if (Array.isArray(existing.data)) {
+        throw new Error(`Repository path '${repoPath}' exists as a directory.`)
+      }
+      if (existing.data.type !== "file") {
+        throw new Error(
+          `Repository path '${repoPath}' exists but is ${existing.data.type}, not a file.`,
+        )
+      }
+    } catch (error) {
+      if (isNotFoundError(error)) return
+      throw error
+    }
+  }
 }
 
 export const installationsCmd = Command.make("installations", {}, () =>
@@ -251,6 +427,16 @@ export const statusCmd = Command.make("status", { repo: repoArg }, ({ repo }) =>
             message: { description: "Git commit message", required: true },
             file: { description: "Local file to commit", required: true },
             path: { description: "Target repository path" },
+          },
+        },
+        {
+          command: "commit-files <repo> --branch <branch> --message <message> --file <file> [--file <file>...] [--dry-run]",
+          description: "Atomically commit multiple local files to GitHub as ShitRat",
+          params: {
+            repo: { value: repoRef.fullName, required: true },
+            branch: { default: repository.data.default_branch ?? "main" },
+            message: { description: "Git commit message", required: true },
+            file: { description: "Repeat --file for each local file", required: true },
           },
         },
       ],
@@ -369,49 +555,7 @@ export const commitFileCmd = Command.make(
       }
 
       const { octokit, token } = yield* createRepoOctokit(repoRef)
-
-      const createdBranch = yield* Effect.tryPromise({
-        try: async () => {
-          try {
-            await octokit.rest.repos.getBranch({
-              owner: repoRef.owner,
-              repo: repoRef.repo,
-              branch: targetBranch,
-            })
-            return false
-          } catch (error) {
-            if (!isNotFoundError(error)) throw error
-
-            const base = optionToUndefined(createBranchFrom)
-            if (!base) {
-              throw new Error(
-                `Branch '${targetBranch}' does not exist. Pass --create-branch-from <base-branch> to create it.`,
-              )
-            }
-
-            const baseBranch = normalizeGitRef(base)
-            const baseRef = await octokit.rest.git.getRef({
-              owner: repoRef.owner,
-              repo: repoRef.repo,
-              ref: `heads/${baseBranch}`,
-            })
-
-            try {
-              await octokit.rest.git.createRef({
-                owner: repoRef.owner,
-                repo: repoRef.repo,
-                ref: `refs/heads/${targetBranch}`,
-                sha: baseRef.data.object.sha,
-              })
-              return true
-            } catch (createError) {
-              if (isAlreadyExistsError(createError)) return false
-              throw createError
-            }
-          }
-        },
-        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
-      })
+      const branchHead = yield* ensureBranch(octokit, repoRef, targetBranch, createBranchFrom)
 
       const existingSha = yield* Effect.tryPromise({
         try: async () => {
@@ -456,7 +600,7 @@ export const commitFileCmd = Command.make(
           repo: repoRef.fullName,
           branch: targetBranch,
           action: existingSha ? "updated" : "created",
-          created_branch: createdBranch,
+          created_branch: branchHead.createdBranch,
           file: {
             local_path: prepared.localPath,
             repo_path: prepared.repoPath,
@@ -514,6 +658,218 @@ export const commitFileCmd = Command.make(
       ),
     ),
 ).pipe(Command.withDescription("Commit one local file to GitHub as ShitRat"))
+
+
+export const commitFilesCmd = Command.make(
+  "commit-files",
+  {
+    repo: repoArg,
+    branch: branchOption,
+    message: messageOption,
+    files: filesOption,
+    createBranchFrom: createBranchFromOption,
+    dryRun: dryRunOption,
+  },
+  ({ repo, branch, message, files, createBranchFrom, dryRun }) =>
+    Effect.gen(function* () {
+      const repoRef = parseRepo(repo)
+      const targetBranch = normalizeGitRef(branch)
+      const command = `commit-files ${repoRef.fullName}`
+
+      if (files.length === 0) {
+        throw new Error("Pass at least one --file <path>.")
+      }
+
+      const preparedFiles = yield* Effect.forEach(files, (file) =>
+        prepareCommitFile(file, Option.none()),
+      )
+      const duplicate = findDuplicateRepoPath(preparedFiles)
+      if (duplicate) {
+        throw new Error(`Duplicate repository path '${duplicate}'. Each --file must map to one unique path.`)
+      }
+      const totalBytes = preparedFiles.reduce((sum, prepared) => sum + prepared.size, 0)
+      if (totalBytes > MAX_COMMIT_BATCH_BYTES) {
+        throw new Error(
+          `Commit batch is ${totalBytes} bytes; commit-files is capped at ${MAX_COMMIT_BATCH_BYTES} bytes. Use normal git for larger changes.`,
+        )
+      }
+
+      const fileReceipts = preparedFiles.map((prepared) => ({
+        local_path: prepared.localPath,
+        repo_path: prepared.repoPath,
+        size: prepared.size,
+        sha256: prepared.sha256,
+      }))
+
+      if (dryRun) {
+        yield* printSuccess(
+          command,
+          {
+            dry_run: true,
+            repo: repoRef.fullName,
+            branch: targetBranch,
+            message,
+            files: fileReceipts,
+            file_count: preparedFiles.length,
+            total_size: totalBytes,
+            github_write: false,
+          },
+          [
+            {
+              command: "commit-files <repo> --branch <branch> --message <message> --file <file> [--file <file>...]",
+              description: "Atomically commit these local files to GitHub as ShitRat",
+              params: {
+                repo: { value: repoRef.fullName, required: true },
+                branch: { value: targetBranch, default: "main" },
+                message: { value: message, required: true },
+                file: { required: true, description: "Repeat --file for each local file" },
+              },
+            },
+          ],
+        )
+        return
+      }
+
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const branchBase = yield* resolveBranchBase(octokit, repoRef, targetBranch, createBranchFrom)
+
+      const commitResult = yield* Effect.tryPromise({
+        try: async () => {
+          const baseCommit = await octokit.rest.git.getCommit({
+            owner: repoRef.owner,
+            repo: repoRef.repo,
+            commit_sha: branchBase.headSha,
+          })
+
+          await Promise.all(
+            preparedFiles.map((prepared) =>
+              preflightRepoPath(octokit, repoRef, branchBase.headSha, prepared.repoPath),
+            ),
+          )
+
+          const blobs = await Promise.all(
+            preparedFiles.map(async (prepared) => {
+              const blob = await octokit.rest.git.createBlob({
+                owner: repoRef.owner,
+                repo: repoRef.repo,
+                content: prepared.base64,
+                encoding: "base64",
+              })
+              return { prepared, sha: blob.data.sha }
+            }),
+          )
+
+          const tree = await octokit.rest.git.createTree({
+            owner: repoRef.owner,
+            repo: repoRef.repo,
+            base_tree: baseCommit.data.tree.sha,
+            tree: blobs.map(({ prepared, sha }) => ({
+              path: prepared.repoPath,
+              mode: "100644" as const,
+              type: "blob" as const,
+              sha,
+            })),
+          })
+
+          const newCommit = await octokit.rest.git.createCommit({
+            owner: repoRef.owner,
+            repo: repoRef.repo,
+            message,
+            tree: tree.data.sha,
+            parents: [branchBase.headSha],
+          })
+
+          if (branchBase.branchExists) {
+            await octokit.rest.git.updateRef({
+              owner: repoRef.owner,
+              repo: repoRef.repo,
+              ref: `heads/${targetBranch}`,
+              sha: newCommit.data.sha,
+              force: false,
+            })
+            return { commit: newCommit.data, createdBranch: false }
+          }
+
+          try {
+            await octokit.rest.git.createRef({
+              owner: repoRef.owner,
+              repo: repoRef.repo,
+              ref: `refs/heads/${targetBranch}`,
+              sha: newCommit.data.sha,
+            })
+            return { commit: newCommit.data, createdBranch: true }
+          } catch (createError) {
+            if (!isAlreadyExistsError(createError)) throw createError
+            await octokit.rest.git.updateRef({
+              owner: repoRef.owner,
+              repo: repoRef.repo,
+              ref: `heads/${targetBranch}`,
+              sha: newCommit.data.sha,
+              force: false,
+            })
+            return { commit: newCommit.data, createdBranch: false }
+          }
+        },
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      })
+
+      yield* printSuccess(
+        command,
+        {
+          repo: repoRef.fullName,
+          branch: targetBranch,
+          created_branch: commitResult.createdBranch,
+          files: fileReceipts,
+          file_count: preparedFiles.length,
+          total_size: totalBytes,
+          commit: {
+            sha: commitResult.commit.sha,
+            html_url: commitResult.commit.html_url,
+          },
+          actor: "shitratgit[bot]",
+          installation_id: token.installationId,
+        },
+        [
+          {
+            command: "status <repo>",
+            description: "Verify ShitRat still has access to this repository",
+            params: { repo: { value: repoRef.fullName, required: true } },
+          },
+          {
+            command: "commit-files <repo> --branch <branch> --message <message> --file <file> [--file <file>...] [--dry-run]",
+            description: "Commit another small batch of files atomically as ShitRat",
+            params: {
+              repo: { value: repoRef.fullName, required: true },
+              branch: { value: targetBranch, default: "main" },
+              message: { required: true },
+              file: { required: true, description: "Repeat --file for each local file" },
+            },
+          },
+        ],
+      )
+    }).pipe(
+      Effect.catchAll((error) =>
+        printFailure(
+          `commit-files ${repo}`,
+          error,
+          "COMMIT_FILES_FAILED",
+          "Verify Contents: write permission, repo installation access, branch existence, and that every --file is inside cwd. Use --dry-run first if unsure.",
+          [
+            {
+              command: "commit-files <repo> --branch <branch> --message <message> --file <file> [--file <file>...] [--dry-run]",
+              description: "Preview or retry an atomic multi-file commit as ShitRat",
+              params: {
+                repo: { value: repo, required: true },
+                branch: { default: "main" },
+                message: { required: true },
+                file: { required: true, description: "Repeat --file for each local file" },
+              },
+            },
+          ],
+        ),
+      ),
+    ),
+).pipe(Command.withDescription("Atomically commit multiple local files to GitHub as ShitRat"))
 
 export const reviewCmd = Command.make(
   "review",

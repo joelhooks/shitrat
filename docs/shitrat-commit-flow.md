@@ -53,10 +53,34 @@ shitrat commit-file joelhooks/shitrat-cli \
   --file docs/shitrat-commit-flow.md
 ```
 
+## Multi-file atomic commit
+
+Use `commit-files` for a small batch that should land in one commit:
+
+```bash
+shitrat commit-files joelhooks/shitrat-cli \
+  --branch main \
+  --message "docs: update ShitRat docs" \
+  --file README.md \
+  --file docs/shitrat-commit-flow.md \
+  --dry-run
+
+shitrat commit-files joelhooks/shitrat-cli \
+  --branch main \
+  --message "docs: update ShitRat docs" \
+  --file README.md \
+  --file docs/shitrat-commit-flow.md
+```
+
+`commit-files` uses Git blobs + trees under the hood, then advances the branch ref once. That makes the batch atomic instead of one commit per file.
+
+Safety caps: each file is capped at 5 MiB and each batch is capped at 10 MiB. This keeps the GitHub API path for small agent commits, not giant artifact nonsense.
+
 ## Use normal git instead when
 
-- The change spans many files.
+- The change is large or complicated.
 - You need local hooks or a full test/commit/push loop.
 - You need a signed commit.
+- You need custom file modes, deletes, renames, or binary artifacts larger than the safety cap.
 
-`commit-file` is intentionally small and boring: one local file, one GitHub API commit, JSON receipts.
+`commit-file` and `commit-files` are intentionally small and boring: local file(s), GitHub API commit, JSON receipts.

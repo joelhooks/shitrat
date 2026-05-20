@@ -62,6 +62,9 @@ bun run src/cli.ts commit-file joelhooks/shitrat-cli --branch main --message "do
 
 # Commit one file as shitratgit[bot]
 bun run src/cli.ts commit-file joelhooks/shitrat-cli --branch main --message "docs: update README" --file README.md
+
+# Atomically commit multiple files as shitratgit[bot]
+bun run src/cli.ts commit-files joelhooks/shitrat-cli --branch main --message "docs: update ShitRat docs" --file README.md --file docs/shitrat-commit-flow.md
 ```
 
 Review events:
@@ -72,11 +75,23 @@ Review events:
 
 More detail: [`docs/shitrat-commit-flow.md`](docs/shitrat-commit-flow.md)
 
+## Diff viewer
+
+Hunk is configured as the system and repo-local Git difftool:
+
+```bash
+git difftool
+git difftool --staged
+git difftool main...HEAD
+```
+
+More detail: [`docs/hunk-diff-viewer.md`](docs/hunk-diff-viewer.md)
+
 ## Pi package
 
 This repo includes:
 
-- `extensions/shitrat`: pi extension that registers `shitrat_status`, `shitrat_comment`, `shitrat_review`, and `shitrat_commit_file` tools.
+- `extensions/shitrat`: pi extension that registers `shitrat_status`, `shitrat_comment`, `shitrat_review`, `shitrat_commit_file`, and `shitrat_commit_files` tools.
 - `skills/shitrat-github`: skill instructions for using ShitRat as the GitHub actor.
 
 Install locally:

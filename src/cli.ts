@@ -3,7 +3,14 @@
 import { Command } from "@effect/cli"
 import { BunContext } from "@effect/platform-bun"
 import { Console, Effect } from "effect"
-import { commitFileCmd, commentCmd, installationsCmd, reviewCmd, statusCmd } from "./commands/github.js"
+import {
+  commitFileCmd,
+  commitFilesCmd,
+  commentCmd,
+  installationsCmd,
+  reviewCmd,
+  statusCmd,
+} from "./commands/github.js"
 import { errorMessage, failure, json, success } from "./response.js"
 
 const root = Command.make("shitrat", {}, () =>
@@ -25,6 +32,8 @@ const root = Command.make("shitrat", {}, () =>
                 "shitrat review <owner/repo> <pull-number> --event APPROVE|REQUEST_CHANGES|COMMENT --body-file <path>",
               commit_file:
                 "shitrat commit-file <owner/repo> --branch main --message <message> --file <local-path> [--path <repo-path>]",
+              commit_files:
+                "shitrat commit-files <owner/repo> --branch main --message <message> --file <path> [--file <path>...]",
             },
             secrets: [
               "shitrat_github_app_id",
@@ -82,12 +91,31 @@ const root = Command.make("shitrat", {}, () =>
                 path: { description: "Target repository path; defaults to --file relative to cwd" },
               },
             },
+            {
+              command: "commit-files <repo> --branch <branch> --message <message> --file <file> [--file <file>...] [--dry-run]",
+              description: "Atomically commit multiple local files to GitHub as ShitRat",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                branch: { default: "main", description: "Target branch" },
+                message: { required: true, description: "Git commit message" },
+                file: { required: true, description: "Repeat --file for each local file" },
+              },
+            },
           ],
         ),
       ),
     )
   }),
-).pipe(Command.withSubcommands([installationsCmd, statusCmd, commentCmd, reviewCmd, commitFileCmd]))
+).pipe(
+  Command.withSubcommands([
+    installationsCmd,
+    statusCmd,
+    commentCmd,
+    reviewCmd,
+    commitFileCmd,
+    commitFilesCmd,
+  ]),
+)
 
 const cli = Command.run(root, {
   name: "shitrat",

@@ -133,4 +133,28 @@ describe("cli json output", () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test("dry-runs commit-files atomically without GitHub credentials", async () => {
+    const result = await runCli(
+      "commit-files",
+      "joelhooks/shitrat-cli",
+      "--branch",
+      "main",
+      "--message",
+      "test: dry run",
+      "--file",
+      "README.md",
+      "--file",
+      "AGENTS.md",
+      "--dry-run",
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe("")
+    expect(result.json.ok).toBe(true)
+    expect(result.json.result?.dry_run).toBe(true)
+    expect(result.json.result?.file_count).toBe(2)
+    expect(result.stdout).toContain("README.md")
+    expect(result.stdout).toContain("AGENTS.md")
+  })
 })
