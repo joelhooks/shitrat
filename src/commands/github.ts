@@ -67,6 +67,12 @@ const dryRunOption = Options.boolean("dry-run").pipe(
   Options.withDescription("Preview the commit payload without contacting GitHub or writing anything"),
 )
 
+const shitRatCommitIdentity = () => ({
+  name: "shitratgit[bot]",
+  email: "286405550+shitratgit[bot]@users.noreply.github.com",
+  date: new Date().toISOString(),
+})
+
 const printSuccess = (command: string, result: unknown, nextActions: readonly NextAction[] = []) =>
   Console.log(json(success(command, result, nextActions)))
 
@@ -590,6 +596,8 @@ export const commitFileCmd = Command.make(
             content: prepared.base64,
             branch: targetBranch,
             sha: existingSha,
+            author: shitRatCommitIdentity(),
+            committer: shitRatCommitIdentity(),
           }),
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
       })
@@ -777,6 +785,8 @@ export const commitFilesCmd = Command.make(
             message,
             tree: tree.data.sha,
             parents: [branchBase.headSha],
+            author: shitRatCommitIdentity(),
+            committer: shitRatCommitIdentity(),
           })
 
           if (branchBase.branchExists) {
