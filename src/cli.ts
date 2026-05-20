@@ -1,10 +1,10 @@
 #!/usr/bin/env bun
 
 import { Command } from "@effect/cli"
-import { BunContext, BunRuntime } from "@effect/platform-bun"
+import { BunContext } from "@effect/platform-bun"
 import { Console, Effect } from "effect"
 import { commentCmd, installationsCmd, reviewCmd, statusCmd } from "./commands/github.js"
-import { json, success } from "./response.js"
+import { errorMessage, failure, json, success } from "./response.js"
 
 const root = Command.make("shitrat", {}, () =>
   Effect.gen(function* () {
@@ -84,4 +84,107 @@ const cli = Command.run(root, {
 // Compatibility no-ops. JSON is the only output format.
 const argv = process.argv.filter((arg) => arg !== "--json" && arg !== "--toon")
 
-cli(argv).pipe(Effect.provide(BunContext.layer), BunRuntime.runMain)
+const stripAnsi = (text: string): string =>
+  text
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
+
+const isJsonEnvelope = (text: string): boolean => {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith("{")) return false
+  try {
+    const parsed = JSON.parse(trimmed) as { ok?: unknown }
+    return typeof parsed === "object" && parsed !== null && "ok" in parsed
+  } catch {
+    return false
+  }
+}
+
+const commandString = () => argv.slice(2).join(" ") || "shitrat"
+
+const capturedStdout: string[] = []
+const capturedStderr: string[] = []
+const rawStdoutWrite = process.stdout.write.bind(process.stdout)
+const rawStderrWrite = process.stderr.write.bind(process.stderr)
+const rawConsoleLog = console.log.bind(console)
+const rawConsoleError = console.error.bind(console)
+
+process.stdout.write = ((chunk: string | Uint8Array, ...args: unknown[]) => {
+  capturedStdout.push(String(chunk))
+  const callback = args.find((arg) => typeof arg === "function") as
+    | ((error?: Error | null) => void)
+    | undefined
+  callback?.()
+  return true
+}) as typeof process.stdout.write
+
+process.stderr.write = ((chunk: string | Uint8Array, ...args: unknown[]) => {
+  capturedStderr.push(String(chunk))
+  const callback = args.find((arg) => typeof arg === "function") as
+    | ((error?: Error | null) => void)
+    | undefined
+  callback?.()
+  return true
+}) as typeof process.stderr.write
+
+console.log = (...args: unknown[]) => {
+  capturedStdout.push(`${args.map(String).join(" ")}\n`)
+}
+
+console.error = (...args: unknown[]) => {
+  capturedStderr.push(`${args.map(String).join(" ")}\n`)
+}
+
+const restoreOutput = () => {
+  process.stdout.write = rawStdoutWrite as typeof process.stdout.write
+  process.stderr.write = rawStderrWrite as typeof process.stderr.write
+  console.log = rawConsoleLog
+  console.error = rawConsoleError
+}
+
+const writeStdout = (text: string) => {
+  rawStdoutWrite(text.endsWith("\n") ? text : `${text}\n`)
+}
+
+const run = cli(argv).pipe(Effect.provide(BunContext.layer))
+
+Effect.runPromise(run)
+  .then(() => {
+    restoreOutput()
+    const stdout = capturedStdout.join("")
+    const stderr = capturedStderr.join("")
+    if (isJsonEnvelope(stdout)) {
+      writeStdout(stdout)
+      return
+    }
+
+    writeStdout(
+      json(
+        success(commandString(), {
+          stdout: stripAnsi(stdout).trim(),
+          stderr: stripAnsi(stderr).trim() || undefined,
+        }),
+      ),
+    )
+  })
+  .catch((error: unknown) => {
+    restoreOutput()
+    const stderr = stripAnsi(capturedStderr.join("")).trim()
+    writeStdout(
+      json(
+        failure(
+          commandString(),
+          stderr || errorMessage(error),
+          "CLI_USAGE_ERROR",
+          "Run `shitrat` with no args for JSON command discovery, or pass valid command arguments.",
+          [
+            {
+              command: "shitrat",
+              description: "Show JSON command discovery output",
+            },
+          ],
+        ),
+      ),
+    )
+    process.exitCode = 1
+  })

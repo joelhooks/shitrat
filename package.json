@@ -5,8 +5,8 @@
   "type": "module",
   "private": true,
   "bin": {
-    "shitrat": "./dist/cli.js",
-    "sr": "./dist/cli.js"
+    "shitrat": "./src/cli.ts",
+    "sr": "./src/cli.ts"
   },
   "scripts": {
     "dev": "bun run src/cli.ts",
