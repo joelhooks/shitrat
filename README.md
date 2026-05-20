@@ -9,7 +9,7 @@ ShitRat uses short-lived GitHub App installation tokens, not Joel's PAT. The CLI
 ```bash
 bun install
 bun run check
-bun test
+bun run test
 bun run build
 ```
 
@@ -105,6 +105,16 @@ Install from GitHub after push:
 ```bash
 pi install git:github.com/joelhooks/shitrat-cli
 ```
+
+## Test scope
+
+Use the scoped project test script:
+
+```bash
+bun run test
+```
+
+Do not use broad `bun test` as the project health check. It descends into vendored `/pi` reference source tests and can fail on Vitest API mismatch outside ShitRat’s code.
 
 ## TypeScript 7 / tsgo
 
