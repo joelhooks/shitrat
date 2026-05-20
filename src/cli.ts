@@ -149,6 +149,8 @@ const rawStdoutWrite = process.stdout.write.bind(process.stdout)
 const rawStderrWrite = process.stderr.write.bind(process.stderr)
 const rawConsoleLog = console.log.bind(console)
 const rawConsoleError = console.error.bind(console)
+const rawConsoleWarn = console.warn.bind(console)
+const rawConsoleInfo = console.info.bind(console)
 
 process.stdout.write = ((chunk: string | Uint8Array, ...args: unknown[]) => {
   capturedStdout.push(String(chunk))
@@ -176,11 +178,21 @@ console.error = (...args: unknown[]) => {
   capturedStderr.push(`${args.map(String).join(" ")}\n`)
 }
 
+console.warn = (...args: unknown[]) => {
+  capturedStderr.push(`${args.map(String).join(" ")}\n`)
+}
+
+console.info = (...args: unknown[]) => {
+  capturedStdout.push(`${args.map(String).join(" ")}\n`)
+}
+
 const restoreOutput = () => {
   process.stdout.write = rawStdoutWrite as typeof process.stdout.write
   process.stderr.write = rawStderrWrite as typeof process.stderr.write
   console.log = rawConsoleLog
   console.error = rawConsoleError
+  console.warn = rawConsoleWarn
+  console.info = rawConsoleInfo
 }
 
 const writeStdout = (text: string) => {
