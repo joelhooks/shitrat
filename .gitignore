@@ -27,6 +27,11 @@ logs
 *.log
 report.*.json
 
+# local pi-notes/session scratch
+.pi/
+.brain/
+BRAIN.md
+
 # editors/os
 .idea
 .DS_Store
