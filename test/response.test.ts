@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { parseRepo } from "../src/github-app.js"
 import { failure, success } from "../src/response.js"
 
@@ -15,7 +18,12 @@ const runCli = async (...args: string[]) => {
     proc.exited,
   ])
 
-  return { stdout, stderr, exitCode, json: JSON.parse(stdout) as { ok: boolean } }
+  return {
+    stdout,
+    stderr,
+    exitCode,
+    json: JSON.parse(stdout) as { ok: boolean; result?: Record<string, unknown> },
+  }
 }
 
 describe("response envelope", () => {
@@ -65,5 +73,64 @@ describe("cli json output", () => {
     expect(result.stderr).toBe("")
     expect(result.json.ok).toBe(true)
     expect(result.stdout).toContain("COMMANDS")
+  })
+
+  test("rejects unsafe commit-file repo paths", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "shitrat-test-"))
+    const file = join(dir, "note.md")
+    await writeFile(file, "hello from the rat\n", "utf8")
+
+    try {
+      const result = await runCli(
+        "commit-file",
+        "joelhooks/shitrat-cli",
+        "--branch",
+        "main",
+        "--message",
+        "test: dry run",
+        "--file",
+        file,
+        "--path",
+        "/docs/nope.md",
+        "--dry-run",
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(result.json.ok).toBe(false)
+      expect(result.stdout).toContain("Use a relative path")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("dry-runs commit-file without GitHub credentials", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "shitrat-test-"))
+    const file = join(dir, "note.md")
+    await writeFile(file, "hello from the rat\n", "utf8")
+
+    try {
+      const result = await runCli(
+        "commit-file",
+        "joelhooks/shitrat-cli",
+        "--branch",
+        "main",
+        "--message",
+        "test: dry run",
+        "--file",
+        file,
+        "--path",
+        "docs/note.md",
+        "--dry-run",
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(result.json.ok).toBe(true)
+      expect(result.json.result?.dry_run).toBe(true)
+      expect(result.stdout).toContain("docs/note.md")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

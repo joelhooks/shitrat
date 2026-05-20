@@ -15,21 +15,23 @@ const runShitRat = async (
   pi: ExtensionAPI,
   args: readonly string[],
   signal?: AbortSignal,
+  cwd = packageRoot,
 ) => {
   const result = await pi.exec("bun", ["run", cliPath, ...args], {
-    cwd: packageRoot,
+    cwd,
     signal,
     timeout: 60_000,
   })
 
   const output = result.stdout.trim()
-  if (result.code !== 0) {
-    throw new Error(result.stderr.trim() || output || `shitrat exited ${result.code}`)
-  }
 
   try {
-    return JSON.parse(output) as unknown
+    const parsed = JSON.parse(output) as unknown
+    return parsed
   } catch {
+    if (result.code !== 0) {
+      throw new Error(result.stderr.trim() || output || `shitrat exited ${result.code}`)
+    }
     return { raw: output }
   }
 }
@@ -53,14 +55,18 @@ export default function shitratExtension(pi: ExtensionAPI) {
   pi.registerCommand("shitrat", {
     description: "Run ShitRat GitHub App CLI status/installations from pi",
     getArgumentCompletions: (prefix) => {
-      const items = ["installations", "status skillrecordings/migrate-egghead"]
+      const items = [
+        "installations",
+        "status skillrecordings/migrate-egghead",
+        "commit-file skillrecordings/migrate-egghead --branch main --message 'message' --file path --dry-run",
+      ]
       const filtered = items.filter((item) => item.startsWith(prefix))
       return filtered.map((value) => ({ value, label: value }))
     },
     handler: async (args, ctx) => {
       const parts = args.trim().length > 0 ? args.trim().split(/\s+/) : []
       const commandArgs = parts.length > 0 ? parts : []
-      const result = await runShitRat(pi, commandArgs, ctx.signal)
+      const result = await runShitRat(pi, commandArgs, ctx.signal, ctx.cwd)
       ctx.ui.notify(JSON.stringify(result, null, 2), "info")
     },
   })
@@ -107,6 +113,53 @@ export default function shitratExtension(pi: ExtensionAPI) {
           signal,
         ),
       )
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        details: result,
+      }
+    },
+  })
+
+  pi.registerTool({
+    name: "shitrat_commit_file",
+    label: "ShitRat Commit File",
+    description: "Commit one local file to GitHub as shitratgit[bot].",
+    promptSnippet: "Commit a local file to GitHub as shitratgit[bot] via the ShitRat GitHub App",
+    promptGuidelines: [
+      "Use shitrat_commit_file instead of gh/git push when Joel wants the commit authored by ShitRat's GitHub App identity.",
+      "Prefer dryRun: true first unless the user explicitly asked to write the commit.",
+      "Use path when the local file is outside the repo root or should land at a different repository path.",
+    ],
+    parameters: Type.Object({
+      repo: Type.String({ description: "Repository in owner/repo form" }),
+      branch: Type.Optional(Type.String({ description: "Target branch; defaults to main" })),
+      message: Type.String({ description: "Git commit message" }),
+      file: Type.String({ description: "Local file to commit" }),
+      path: Type.Optional(Type.String({ description: "Target path in the GitHub repository" })),
+      createBranchFrom: Type.Optional(
+        Type.String({ description: "Create branch from this existing branch if missing" }),
+      ),
+      dryRun: Type.Optional(Type.Boolean({ description: "Preview without writing to GitHub" })),
+      cwd: Type.Optional(
+        Type.String({ description: "Working directory to resolve relative file paths; defaults to current pi cwd" }),
+      ),
+    }),
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const args = [
+        "commit-file",
+        params.repo,
+        "--branch",
+        params.branch ?? "main",
+        "--message",
+        params.message,
+        "--file",
+        params.file,
+      ]
+      if (params.path) args.push("--path", params.path)
+      if (params.createBranchFrom) args.push("--create-branch-from", params.createBranchFrom)
+      if (params.dryRun) args.push("--dry-run")
+
+      const result = await runShitRat(pi, args, signal, params.cwd ?? ctx.cwd)
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         details: result,

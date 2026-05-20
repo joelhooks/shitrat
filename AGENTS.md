@@ -17,6 +17,7 @@ ShitRat CLI is an agent-first GitHub App CLI and pi package. It posts as `shitra
 - Do not print private keys or installation tokens by default.
 - Prefer `--body-file` for GitHub comments/reviews.
 - Use `shitrat status <owner/repo>` before posting if access is uncertain.
+- Use `shitrat commit-file ... --dry-run` before GitHub API commits unless Joel explicitly approved the write.
 - Do not use `gh pr review` when the intended GitHub actor is ShitRat.
 
 ## Commands
@@ -26,6 +27,7 @@ bun run check
 bun test
 bun run build
 bun run src/cli.ts status skillrecordings/migrate-egghead
+bun run src/cli.ts commit-file joelhooks/shitrat-cli --branch main --message "docs: update README" --file README.md --dry-run
 ```
 
 ## Vendored source trees

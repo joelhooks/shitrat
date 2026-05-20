@@ -56,6 +56,12 @@ bun run src/cli.ts comment skillrecordings/migrate-egghead 26 --body-file commen
 
 # Create PR review as shitratgit[bot]
 bun run src/cli.ts review skillrecordings/egghead-next 1608 --event REQUEST_CHANGES --body-file review.md
+
+# Preview one-file GitHub API commit as shitratgit[bot]
+bun run src/cli.ts commit-file joelhooks/shitrat-cli --branch main --message "docs: update README" --file README.md --dry-run
+
+# Commit one file as shitratgit[bot]
+bun run src/cli.ts commit-file joelhooks/shitrat-cli --branch main --message "docs: update README" --file README.md
 ```
 
 Review events:
@@ -64,11 +70,13 @@ Review events:
 - `APPROVE`
 - `REQUEST_CHANGES`
 
+More detail: [`docs/shitrat-commit-flow.md`](docs/shitrat-commit-flow.md)
+
 ## Pi package
 
 This repo includes:
 
-- `extensions/shitrat`: pi extension that registers `shitrat_status`, `shitrat_comment`, and `shitrat_review` tools.
+- `extensions/shitrat`: pi extension that registers `shitrat_status`, `shitrat_comment`, `shitrat_review`, and `shitrat_commit_file` tools.
 - `skills/shitrat-github`: skill instructions for using ShitRat as the GitHub actor.
 
 Install locally:
