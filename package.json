@@ -1,66 +1,24 @@
 {
-  "name": "@joelhooks/shitrat-cli",
+  "name": "shitrat",
   "version": "0.1.0",
-  "description": "ShitRat GitHub App CLI and pi package for agent-owned GitHub comments, reviews, and repo work.",
-  "type": "module",
   "private": true,
-  "bin": {
-    "shitrat": "./src/cli.ts",
-    "sr": "./src/cli.ts"
-  },
+  "description": "Deployable ShitRat familiar monorepo for agent harnesses.",
+  "packageManager": "pnpm@10.17.1",
   "scripts": {
-    "dev": "bun run src/cli.ts",
-    "check": "tsgo --noEmit --pretty false",
-    "test": "bun test ./test/response.test.ts",
-    "build": "tsgo -p tsconfig.build.json && bun build src/cli.ts --target bun --outdir dist && chmod +x dist/cli.js",
-    "build:binary": "bun build src/cli.ts --compile --outfile dist/shitrat",
-    "smoke": "bun run src/cli.ts status skillrecordings/migrate-egghead"
-  },
-  "keywords": [
-    "pi-package",
-    "github-app",
-    "effect",
-    "cli",
-    "shitrat"
-  ],
-  "pi": {
-    "extensions": [
-      "./extensions"
-    ],
-    "skills": [
-      "./skills"
-    ]
-  },
-  "dependencies": {
-    "@effect/cli": "^0.75.1",
-    "@effect/platform": "^0.96.1",
-    "@effect/platform-bun": "^0.89.0",
-    "@octokit/auth-app": "^8.2.0",
-    "@octokit/rest": "^22.0.1",
-    "effect": "^3.21.2",
-    "typebox": "^1.1.38"
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.74.1",
-    "@earendil-works/pi-ai": "^0.74.1",
-    "@earendil-works/pi-tui": "^0.74.1"
+    "check": "turbo run check",
+    "test": "turbo run test",
+    "build": "turbo run build",
+    "doctor": "turbo run doctor",
+    "format": "turbo run format"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.74.1",
-    "@earendil-works/pi-coding-agent": "^0.74.1",
-    "@earendil-works/pi-tui": "^0.74.1",
     "@types/bun": "^1.3.14",
     "@types/node": "^25.8.0",
     "@typescript/native-preview": "^7.0.0-dev.20260421.2",
-    "typescript": "^6.0.3"
+    "turbo": "^2.5.8"
   },
   "engines": {
-    "bun": ">=1.3.0",
-    "node": ">=22"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/joelhooks/shitrat-cli.git"
-  },
-  "license": "MIT"
+    "node": ">=22",
+    "pnpm": ">=10"
+  }
 }

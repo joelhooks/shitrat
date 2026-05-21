@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+      - uses: oven-sh/setup-bun@v2
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm turbo run check
+      - run: pnpm turbo run test
+      - run: pnpm --filter @joelhooks/shitrat-cli run build:binary
+      - run: shasum -a 256 packages/cli/dist/shitrat > packages/cli/dist/shitrat-darwin-arm64.sha256
+      - run: packages/cli/dist/shitrat doctor --dry-run
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shitrat-darwin-arm64
+          path: |
+            packages/cli/dist/shitrat
+            packages/cli/dist/shitrat-darwin-arm64.sha256

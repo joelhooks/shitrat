@@ -1,0 +1,20 @@
+{
+  "name": "@joelhooks/shitrat-defaults",
+  "version": "0.1.0",
+  "description": "Public ShitRat default familiar profile.",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check": "tsgo --noEmit --pretty false",
+    "test": "bun test ./test/*.test.ts",
+    "build": "tsgo -p tsconfig.build.json",
+    "doctor": "bun test ./test/*.test.ts",
+    "format": "oxfmt --check . || true"
+  },
+  "dependencies": {
+    "@joelhooks/shitrat-core": "workspace:*"
+  }
+}

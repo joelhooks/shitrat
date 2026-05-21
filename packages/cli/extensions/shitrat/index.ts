@@ -17,11 +17,12 @@ const runShitRat = async (
   signal?: AbortSignal,
   cwd = packageRoot,
 ) => {
-  const result = await pi.exec("bun", ["run", cliPath, ...args], {
+  const execOptions = {
     cwd,
-    signal,
     timeout: 60_000,
-  })
+    ...(signal ? { signal } : {}),
+  }
+  const result = await pi.exec("bun", ["run", cliPath, ...args], execOptions)
 
   const output = result.stdout.trim()
 
@@ -46,6 +47,121 @@ const withBodyFile = async <A>(body: string, fn: (path: string) => Promise<A>): 
     await rm(dir, { recursive: true, force: true })
   }
 }
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null
+
+const stringValue = (value: unknown): string | undefined =>
+  typeof value === "string" && value.length > 0 ? value : undefined
+
+const numberValue = (value: unknown): number | undefined =>
+  typeof value === "number" ? value : undefined
+
+const resultRecord = (value: unknown): Record<string, unknown> => {
+  if (!isRecord(value)) return {}
+  const result = value.result
+  return isRecord(result) ? result : {}
+}
+
+const summarizeFiles = (files: unknown): string => {
+  if (!Array.isArray(files)) return ""
+  const paths = files
+    .map((file) => (isRecord(file) ? stringValue(file.repo_path) : undefined))
+    .filter((path): path is string => Boolean(path))
+  if (paths.length === 0) return ""
+  if (paths.length <= 5) return paths.join(", ")
+  return `${paths.slice(0, 5).join(", ")} +${paths.length - 5} more`
+}
+
+const summarizeShitRatResult = (value: unknown): string => {
+  if (!isRecord(value)) return String(value)
+
+  const command = stringValue(value.command) ?? "shitrat"
+  if (value.ok === false) {
+    const error = isRecord(value.error) ? stringValue(value.error.message) : undefined
+    const fix = stringValue(value.fix)
+    return [`❌ ${command}`, error, fix ? `Fix: ${fix}` : undefined]
+      .filter(Boolean)
+      .join("\n")
+  }
+
+  const result = resultRecord(value)
+  const repo = stringValue(result.repo)
+  const branch = stringValue(result.branch)
+  const url = stringValue(result.url)
+  const author = stringValue(result.author)
+  const fileCount = numberValue(result.file_count)
+  const totalSize = numberValue(result.total_size)
+  const files = summarizeFiles(result.files)
+  const dryRun = result.dry_run === true
+  const commit = isRecord(result.commit) ? result.commit : undefined
+  const commitSha = commit ? stringValue(commit.sha)?.slice(0, 12) : undefined
+  const commitUrl = commit ? stringValue(commit.html_url) : undefined
+  const singleFile = isRecord(result.file) ? result.file : undefined
+  const singleFilePath = singleFile ? stringValue(singleFile.repo_path) : undefined
+
+  if (command.startsWith("shitrat commit-files")) {
+    return [
+      dryRun ? "🧪 Dry run: ShitRat multi-file commit ready" : "✅ ShitRat committed files",
+      repo && branch ? `${repo}@${branch}` : repo,
+      fileCount
+        ? `${fileCount} file${fileCount === 1 ? "" : "s"}${totalSize ? `, ${totalSize} bytes` : ""}`
+        : undefined,
+      files ? `Files: ${files}` : undefined,
+      commitSha ? `Commit: ${commitSha}` : undefined,
+      commitUrl,
+    ]
+      .filter(Boolean)
+      .join("\n")
+  }
+
+  if (command.startsWith("shitrat commit-file")) {
+    return [
+      dryRun ? "🧪 Dry run: ShitRat file commit ready" : "✅ ShitRat committed file",
+      repo && branch ? `${repo}@${branch}` : repo,
+      singleFilePath ? `File: ${singleFilePath}` : undefined,
+      commitSha ? `Commit: ${commitSha}` : undefined,
+      commitUrl,
+    ]
+      .filter(Boolean)
+      .join("\n")
+  }
+
+  if (command.startsWith("shitrat comment")) {
+    return ["✅ ShitRat posted comment", repo, url, author ? `Author: ${author}` : undefined]
+      .filter(Boolean)
+      .join("\n")
+  }
+
+  if (command.startsWith("shitrat review")) {
+    return ["✅ ShitRat posted PR review", repo, url, author ? `Author: ${author}` : undefined]
+      .filter(Boolean)
+      .join("\n")
+  }
+
+  if (command.startsWith("shitrat status")) {
+    const permissions = isRecord(result.permissions)
+      ? Object.entries(result.permissions)
+          .map(([key, permission]) => `${key}:${String(permission)}`)
+          .join(", ")
+      : undefined
+    return [
+      "✅ ShitRat repo access verified",
+      repo,
+      stringValue(result.default_branch) ? `Default branch: ${result.default_branch}` : undefined,
+      permissions ? `Permissions: ${permissions}` : undefined,
+    ]
+      .filter(Boolean)
+      .join("\n")
+  }
+
+  return JSON.stringify(value, null, 2)
+}
+
+const toolResult = (result: unknown) => ({
+  content: [{ type: "text" as const, text: summarizeShitRatResult(result) }],
+  details: result,
+})
 
 export default function shitratExtension(pi: ExtensionAPI) {
   pi.on("resources_discover", () => ({
@@ -85,10 +201,7 @@ export default function shitratExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal) {
       const result = await runShitRat(pi, ["status", params.repo], signal)
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        details: result,
-      }
+      return toolResult(result)
     },
   })
 
@@ -114,10 +227,7 @@ export default function shitratExtension(pi: ExtensionAPI) {
           signal,
         ),
       )
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        details: result,
-      }
+      return toolResult(result)
     },
   })
 
@@ -161,10 +271,7 @@ export default function shitratExtension(pi: ExtensionAPI) {
       if (params.dryRun) args.push("--dry-run")
 
       const result = await runShitRat(pi, args, signal, params.cwd ?? ctx.cwd)
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        details: result,
-      }
+      return toolResult(result)
     },
   })
 
@@ -208,10 +315,7 @@ export default function shitratExtension(pi: ExtensionAPI) {
       if (params.dryRun) args.push("--dry-run")
 
       const result = await runShitRat(pi, args, signal, params.cwd ?? ctx.cwd)
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        details: result,
-      }
+      return toolResult(result)
     },
   })
 
@@ -246,10 +350,7 @@ export default function shitratExtension(pi: ExtensionAPI) {
           signal,
         ),
       )
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        details: result,
-      }
+      return toolResult(result)
     },
   })
 }

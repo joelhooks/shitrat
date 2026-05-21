@@ -1,0 +1,73 @@
+{
+  "name": "@joelhooks/shitrat-cli",
+  "version": "0.1.0",
+  "description": "ShitRat CLI, installer, and agent harness package.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "shitrat": "./src/cli.ts",
+    "sr": "./src/cli.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/cli.ts",
+    "check": "tsgo --noEmit --pretty false",
+    "test": "bun test ./test/response.test.ts",
+    "build": "tsgo -p tsconfig.build.json && bun build src/cli.ts --target bun --outdir dist && chmod +x dist/cli.js",
+    "build:binary": "bun build src/cli.ts --compile --outfile dist/shitrat",
+    "doctor": "bun run src/cli.ts doctor --dry-run",
+    "format": "oxfmt --check . || true",
+    "smoke": "bun run src/cli.ts status skillrecordings/migrate-egghead"
+  },
+  "keywords": [
+    "pi-package",
+    "github-app",
+    "effect",
+    "cli",
+    "shitrat"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "dependencies": {
+    "@effect/cli": "^0.75.1",
+    "@effect/platform": "^0.96.1",
+    "@effect/platform-bun": "^0.89.0",
+    "@octokit/auth-app": "^8.2.0",
+    "@joelhooks/shitrat-core": "workspace:*",
+    "@joelhooks/shitrat-adapter-claude": "workspace:*",
+    "@joelhooks/shitrat-adapter-codex-desktop": "workspace:*",
+    "@joelhooks/shitrat-adapter-pi": "workspace:*",
+    "@joelhooks/shitrat-defaults": "workspace:*",
+    "@octokit/rest": "^22.0.1",
+    "effect": "^3.21.2",
+    "typebox": "^1.1.38"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.74.1",
+    "@earendil-works/pi-ai": "^0.74.1",
+    "@earendil-works/pi-tui": "^0.74.1"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.74.1",
+    "@earendil-works/pi-coding-agent": "^0.74.1",
+    "@earendil-works/pi-tui": "^0.74.1",
+    "@types/bun": "^1.3.14",
+    "@types/node": "^25.8.0",
+    "@typescript/native-preview": "^7.0.0-dev.20260421.2",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "bun": ">=1.3.0",
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/joelhooks/shitrat.git"
+  },
+  "license": "MIT"
+}

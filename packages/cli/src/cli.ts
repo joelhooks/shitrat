@@ -3,6 +3,22 @@
 import { Command } from "@effect/cli"
 import { BunContext } from "@effect/platform-bun"
 import { Console, Effect } from "effect"
+import { planClaudeInstall } from "@joelhooks/shitrat-adapter-claude"
+import { planCodexDesktopInstall } from "@joelhooks/shitrat-adapter-codex-desktop"
+import { planPiInstall } from "@joelhooks/shitrat-adapter-pi"
+import {
+  compilePrompt,
+  composeProfiles,
+  parityReport,
+  type FamiliarProfile,
+  type FamiliarProfileOverlay,
+  type HarnessTarget,
+} from "@joelhooks/shitrat-core"
+import { createShitRatDefaultProfile } from "@joelhooks/shitrat-defaults"
+import { existsSync } from "node:fs"
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises"
+import { homedir } from "node:os"
+import path from "node:path"
 import {
   commitFileCmd,
   commitFilesCmd,
@@ -143,6 +159,233 @@ const isJsonEnvelope = (text: string): boolean => {
 
 const commandString = () => argv.slice(2).join(" ") || "shitrat"
 
+const harnessTargets = ["codex-desktop", "pi", "claude"] as const
+
+const isHarnessTarget = (value: string | undefined): value is HarnessTarget =>
+  harnessTargets.some((target) => target === value)
+
+const optionValue = (args: readonly string[], name: string): string | undefined => {
+  const index = args.indexOf(name)
+  return index >= 0 ? args[index + 1] : undefined
+}
+
+const hasFlag = (args: readonly string[], name: string): boolean => args.includes(name)
+
+const resolveConfigPath = (args: readonly string[]): string | undefined => {
+  const explicit = optionValue(args, "--config")
+  if (explicit) return path.resolve(explicit)
+  const homeConfig = path.join(homedir(), ".shitrat")
+  return existsSync(homeConfig) ? homeConfig : undefined
+}
+
+const loadOverlayProfile = async (configPath: string | undefined): Promise<FamiliarProfileOverlay | undefined> => {
+  if (!configPath) return undefined
+  const manifestPath = path.join(configPath, "shitrat.config.json")
+  if (!existsSync(manifestPath)) return undefined
+
+  const raw = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    identity?: { name?: string; emoji?: string; voice?: string }
+  }
+
+  return {
+    ...(raw.identity ? { identity: raw.identity } : {}),
+    modules: [],
+  }
+}
+
+const createProfile = async (args: readonly string[]): Promise<{
+  readonly profile: FamiliarProfile
+  readonly configPath?: string
+}> => {
+  const configPath = resolveConfigPath(args)
+  const overlay = await loadOverlayProfile(configPath)
+  const result = {
+    profile: composeProfiles(createShitRatDefaultProfile(), overlay),
+  }
+  return configPath ? { ...result, configPath } : result
+}
+
+const planInstall = (profile: FamiliarProfile, target: HarnessTarget, home?: string) => {
+  if (target === "codex-desktop") return planCodexDesktopInstall(profile, home)
+  if (target === "pi") return planPiInstall(profile, home)
+  return planClaudeInstall(profile, home)
+}
+
+const expandHome = (value: string): string =>
+  value === "~" ? homedir() : value.startsWith("~/") ? path.join(homedir(), value.slice(2)) : value
+
+const writeInstallPlan = async (
+  plan: ReturnType<typeof planInstall>,
+): Promise<readonly { path: string; backup_path?: string; action: string }[]> => {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-")
+  const written: { path: string; backup_path?: string; action: string }[] = []
+
+  for (const file of plan.files) {
+    const targetPath = expandHome(file.path)
+    await mkdir(path.dirname(targetPath), { recursive: true })
+    const backupPath = existsSync(targetPath) ? `${targetPath}.shitrat-backup-${timestamp}` : undefined
+    if (backupPath) await copyFile(targetPath, backupPath)
+    await writeFile(targetPath, file.content, "utf8")
+    written.push({
+      path: targetPath,
+      action: file.action,
+      ...(backupPath ? { backup_path: backupPath } : {}),
+    })
+  }
+
+  return written
+}
+
+const handleNativeShitRatCommand = async (args: readonly string[]): Promise<boolean> => {
+  const subcommand = args[2]
+  if (!subcommand || !["compile", "doctor", "install", "profile", "parity"].includes(subcommand)) {
+    return false
+  }
+
+  try {
+    if (subcommand === "compile") {
+      const target = optionValue(args, "--target")
+      if (!isHarnessTarget(target)) {
+        writeStdout(
+          json(
+            failure(
+              args.slice(2).join(" "),
+              "Missing or invalid --target. Use codex-desktop, pi, or claude.",
+              "INVALID_TARGET",
+              "Pass --target codex-desktop, --target pi, or --target claude.",
+            ),
+          ),
+        )
+        return true
+      }
+
+      const { profile, configPath } = await createProfile(args)
+      const compiled = compilePrompt(profile, target)
+      writeStdout(json(success(args.slice(2).join(" "), { ...compiled, config_path: configPath })))
+      return true
+    }
+
+    if (subcommand === "doctor") {
+      const maybeTarget = args[3]?.startsWith("--") ? undefined : args[3]
+      const target = isHarnessTarget(maybeTarget) ? maybeTarget : "codex-desktop"
+      const { profile, configPath } = await createProfile(args)
+      const plan = planInstall(profile, target, optionValue(args, "--home"))
+      writeStdout(
+        json(
+          success(args.slice(2).join(" "), {
+            target,
+            config_path: configPath,
+            dry_run: hasFlag(args, "--dry-run"),
+            ok: plan.issues.length === 0,
+            issues: plan.issues,
+            planned_files: plan.files.map((file) => ({ path: file.path, action: file.action })),
+            receipts: plan.receipts,
+          }),
+        ),
+      )
+      return true
+    }
+
+    if (subcommand === "install") {
+      const target = args[3]
+      if (!isHarnessTarget(target)) {
+        writeStdout(
+          json(
+            failure(
+              args.slice(2).join(" "),
+              "Missing or invalid install target.",
+              "INVALID_TARGET",
+              "Use `shitrat install codex-desktop --dry-run` before any real install.",
+            ),
+          ),
+        )
+        return true
+      }
+      const dryRun = hasFlag(args, "--dry-run")
+      const yes = hasFlag(args, "--yes")
+      if (!dryRun) {
+        if (!yes) {
+          writeStdout(
+            json(
+              failure(
+                args.slice(2).join(" "),
+                "Real installs require --yes.",
+                "INSTALL_CONFIRMATION_REQUIRED",
+                "Run with --dry-run first, inspect planned_files, then rerun with --yes if the plan is correct.",
+              ),
+            ),
+          )
+          return true
+        }
+      }
+      const { profile, configPath } = await createProfile(args)
+      const plan = planInstall(profile, target, optionValue(args, "--home"))
+      if (dryRun) {
+        writeStdout(json(success(args.slice(2).join(" "), { ...plan, config_path: configPath, dry_run: true })))
+        return true
+      }
+
+      const written_files = await writeInstallPlan(plan)
+      writeStdout(
+        json(
+          success(args.slice(2).join(" "), {
+            target,
+            config_path: configPath,
+            dry_run: false,
+            written_files,
+            receipts: plan.receipts,
+          }),
+        ),
+      )
+      return true
+    }
+
+    if (subcommand === "profile" && args[3] === "doctor") {
+      const configPath = resolveConfigPath(args)
+      const manifestPath = configPath ? path.join(configPath, "shitrat.config.json") : undefined
+      writeStdout(
+        json(
+          success(args.slice(2).join(" "), {
+            config_path: configPath,
+            manifest_path: manifestPath,
+            manifest_exists: manifestPath ? existsSync(manifestPath) : false,
+            next: "Create shitrat.config.json with identity overrides to customize the familiar.",
+          }),
+        ),
+      )
+      return true
+    }
+
+    if (subcommand === "parity") {
+      const { profile, configPath } = await createProfile(args)
+      writeStdout(
+        json(
+          success(args.slice(2).join(" "), {
+            config_path: configPath,
+            report: parityReport(profile, harnessTargets),
+          }),
+        ),
+      )
+      return true
+    }
+  } catch (error) {
+    writeStdout(
+      json(
+        failure(
+          args.slice(2).join(" "),
+          errorMessage(error),
+          "SHITRAT_NATIVE_COMMAND_ERROR",
+          "Inspect the config path and retry with --dry-run.",
+        ),
+      ),
+    )
+    process.exitCode = 1
+    return true
+  }
+
+  return false
+}
+
 const capturedStdout: string[] = []
 const capturedStderr: string[] = []
 const rawStdoutWrite = process.stdout.write.bind(process.stdout)
@@ -197,6 +440,10 @@ const restoreOutput = () => {
 
 const writeStdout = (text: string) => {
   rawStdoutWrite(text.endsWith("\n") ? text : `${text}\n`)
+}
+
+if (await handleNativeShitRatCommand(argv)) {
+  process.exit()
 }
 
 const run = cli(argv).pipe(Effect.provide(BunContext.layer))

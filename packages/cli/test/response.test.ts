@@ -157,4 +157,58 @@ describe("cli json output", () => {
     expect(result.stdout).toContain("README.md")
     expect(result.stdout).toContain("AGENTS.md")
   })
+
+  test("compiles the default Codex Desktop familiar", async () => {
+    const result = await runCli("compile", "--target", "codex-desktop", "--dry-run")
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe("")
+    expect(result.json.ok).toBe(true)
+    expect(result.stdout).toContain("TOOLS: Codex Desktop")
+  })
+
+  test("plans Codex Desktop install as dry run", async () => {
+    const result = await runCli("install", "codex-desktop", "--dry-run", "--home", "/tmp/codex")
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe("")
+    expect(result.json.ok).toBe(true)
+    expect(result.stdout).toContain("/tmp/codex/AGENTS.md")
+  })
+
+  test("refuses real install writes", async () => {
+    const result = await runCli("install", "codex-desktop")
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe("")
+    expect(result.json.ok).toBe(false)
+    expect(result.stdout).toContain("INSTALL_CONFIRMATION_REQUIRED")
+  })
+
+  test("writes install with explicit confirmation and backup behavior", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "shitrat-install-test-"))
+    await writeFile(join(dir, "AGENTS.md"), "old instructions\n", "utf8")
+
+    try {
+      const result = await runCli("install", "codex-desktop", "--home", dir, "--yes")
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(result.json.ok).toBe(true)
+      expect(result.stdout).toContain("backup_path")
+      expect(await Bun.file(join(dir, "AGENTS.md")).text()).toContain("TOOLS: Codex Desktop")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("reports parity across harnesses", async () => {
+    const result = await runCli("parity")
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe("")
+    expect(result.json.ok).toBe(true)
+    expect(result.stdout).toContain("codex-desktop")
+    expect(result.stdout).toContain("claude")
+  })
 })

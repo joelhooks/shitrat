@@ -586,19 +586,20 @@ export const commitFileCmd = Command.make(
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
       })
 
-      const response = yield* Effect.tryPromise({
-        try: () =>
-          octokit.rest.repos.createOrUpdateFileContents({
+      const fileRequest = {
             owner: repoRef.owner,
             repo: repoRef.repo,
             path: prepared.repoPath,
             message,
             content: prepared.base64,
             branch: targetBranch,
-            sha: existingSha,
             author: shitRatCommitIdentity(),
             committer: shitRatCommitIdentity(),
-          }),
+            ...(existingSha ? { sha: existingSha } : {}),
+          }
+
+      const response = yield* Effect.tryPromise({
+        try: () => octokit.rest.repos.createOrUpdateFileContents(fileRequest),
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
       })
 

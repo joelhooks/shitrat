@@ -1,0 +1,17 @@
+{
+  "name": "@joelhooks/shitrat-core",
+  "version": "0.1.0",
+  "description": "Semantic context primitives for ShitRat familiars.",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check": "tsgo --noEmit --pretty false",
+    "test": "bun test ./test/*.test.ts",
+    "build": "tsgo -p tsconfig.build.json",
+    "doctor": "bun test ./test/*.test.ts",
+    "format": "oxfmt --check . || true"
+  }
+}

@@ -1,136 +1,88 @@
-# ShitRat CLI 🐀
+# ShitRat
 
-GitHub App CLI and pi package for posting as `shitratgit[bot]` instead of Joel.
+Deployable agent familiar for Codex Desktop, Pi, Claude, and future harnesses.
 
-ShitRat uses short-lived GitHub App installation tokens, not Joel's PAT. The CLI is agent-first: every command emits a JSON envelope with `ok`, `result`, and `next_actions`.
+ShitRat is not just a prompt blob. It is a semantic context system for building a consistent agent familiar from public defaults, private overlays, typed prompt modules, harness adapters, and dry-run-first install tooling.
 
-## Install
+## Shape
 
-```bash
-bun install
-bun run check
-bun run test
-bun run build
+```text
+packages/
+  cli/                       # shitrat / sr CLI, GitHub App actor, installer, doctor
+  core/                      # semantic context graph, validation, compilation, parity
+  defaults/                  # public ShitRat default profile
+    assets/codex-pets/       # Codex Desktop pet manifests and spritesheets
+  adapters/
+    codex-desktop/           # Codex Desktop install/doctor planning
+    pi/                      # Pi install/doctor planning
+    claude/                  # Claude install/doctor planning
+system/
+  APPENDIX.md                # small always-on hard-law appendix
+skills/
+  shitrat-maintain/          # concise maintenance skill
+docs/
+  concepts/
+  components/
+  adapters/
 ```
 
-Optional local binary:
+## Install for Development
 
 ```bash
-bun run build:binary
-cp dist/shitrat ~/.bun/bin/shitrat
+pnpm install
+pnpm turbo run check
+pnpm turbo run test
+pnpm turbo run build
 ```
 
-## Required secrets
-
-The CLI reads environment variables first, then `agent-secrets` leases.
+## CLI
 
 ```bash
-secrets add shitrat_github_app_id --value '3782744'
-secrets add shitrat_github_client_id --value 'Iv23liAHqTYZQsEkRJRx'
-secrets add shitrat_github_private_key --value "$(cat /path/to/shitratgit.private-key.pem)"
-secrets add shitrat_github_installations_json --value '{"badass-courses":134074872,"skillrecordings":134074954,"wzrrd-sh":134075002}'
+pnpm --filter @joelhooks/shitrat-cli run dev
+pnpm --filter @joelhooks/shitrat-cli run build:binary
 ```
 
-Fallback per-owner installation secrets are also supported:
+The CLI keeps JSON-only output:
 
 ```bash
-secrets add shitrat_github_installation_id_skillrecordings --value '134074954'
-secrets add shitrat_github_installation_id_badass_courses --value '134074872'
-secrets add shitrat_github_installation_id_wzrrd_sh --value '134075002'
+packages/cli/dist/shitrat doctor --dry-run
+packages/cli/dist/shitrat compile --target codex-desktop --dry-run
+packages/cli/dist/shitrat install codex-desktop --dry-run
+packages/cli/dist/shitrat parity
 ```
 
-## Commands
+Real install writes are intentionally disabled in this cut. Use dry-run output and receipts first.
 
-```bash
-# Discover command tree
-bun run src/cli.ts
+## Public Defaults and Private Overlays
 
-# List app installations
-bun run src/cli.ts installations
+The public repo ships real ShitRat defaults. Users can rename the familiar, change emoji/assets/tone, and add their own semantic components.
 
-# Verify access and permissions
-bun run src/cli.ts status skillrecordings/migrate-egghead
+The default Codex Desktop pet lives at `packages/defaults/assets/codex-pets/shitrat`. It ships a Codex-compatible `pet.json`, `spritesheet.webp`, and QA contact sheet for visual review.
 
-# Post issue/PR conversation comment as shitratgit[bot]
-bun run src/cli.ts comment skillrecordings/migrate-egghead 26 --body-file comment.md
+Private/local configuration belongs in `.shitrat`, usually as a private repo or local checkout. Private overlays are for personal facts, machine wiring, secrets references, paid/private corpus references, and private skills.
 
-# Create PR review as shitratgit[bot]
-bun run src/cli.ts review skillrecordings/egghead-next 1608 --event REQUEST_CHANGES --body-file review.md
+The current overlay manifest shape is intentionally small:
 
-# Preview one-file GitHub API commit as shitratgit[bot]
-bun run src/cli.ts commit-file joelhooks/shitrat-cli --branch main --message "docs: update README" --file README.md --dry-run
-
-# Commit one file as shitratgit[bot]
-bun run src/cli.ts commit-file joelhooks/shitrat-cli --branch main --message "docs: update README" --file README.md
-
-# Atomically commit multiple files as shitratgit[bot]
-bun run src/cli.ts commit-files joelhooks/shitrat-cli --branch main --message "docs: update ShitRat docs" --file README.md --file docs/shitrat-commit-flow.md
+```json
+{
+  "identity": {
+    "name": "DeskRat",
+    "emoji": "desk",
+    "voice": "sharp and quiet"
+  }
+}
 ```
 
-Review events:
+## Semantic Context
 
-- `COMMENT`
-- `APPROVE`
-- `REQUEST_CHANGES`
+Prompt modules can be Markdown, MDX, or SVX. Components such as `Identity`, `Rule`, `ToolPolicy`, `BrainPolicy`, `PrivateOverlay`, and `Receipt` are semantic prompt primitives. They are validated and composed before compiling to harness-specific prompt text.
 
-More detail: [`docs/shitrat-commit-flow.md`](docs/shitrat-commit-flow.md)
+SVX is the example/review-surface format because it fits pi-notes. The runtime contract is compiled prompt text for each harness.
 
-## Diff viewer
+## Release Target
 
-Hunk is configured as the system and repo-local Git difftool:
+First release target is modern macOS, arm64-first. GitHub Releases should ship a Bun-compiled standalone binary plus checksum so end users do not need Bun installed.
 
-```bash
-git difftool
-git difftool --staged
-git difftool main...HEAD
-```
+## Current Hard Laws
 
-More detail: [`docs/hunk-diff-viewer.md`](docs/hunk-diff-viewer.md)
-
-## Pi package
-
-This repo includes:
-
-- `extensions/shitrat`: pi extension that registers `shitrat_status`, `shitrat_comment`, `shitrat_review`, `shitrat_commit_file`, and `shitrat_commit_files` tools.
-- `skills/shitrat-github`: skill instructions for using ShitRat as the GitHub actor.
-
-Install locally:
-
-```bash
-pi install /Users/joel/Code/joelhooks/shitrat-cli
-```
-
-Install from GitHub after push:
-
-```bash
-pi install git:github.com/joelhooks/shitrat-cli
-```
-
-## Test scope
-
-Use the scoped project test script:
-
-```bash
-bun run test
-```
-
-Do not use broad `bun test` as the project health check. It descends into vendored `/pi` reference source tests and can fail on Vitest API mismatch outside ShitRat’s code.
-
-## TypeScript 7 / tsgo
-
-This project uses the Microsoft TypeScript-Go native compiler preview via `@typescript/native-preview`.
-
-```bash
-bun run check # tsgo --noEmit --pretty false
-```
-
-Reference: https://github.com/microsoft/typescript-go
-
-## Vendored source references
-
-The repo keeps shallow, squashed source snapshots for local reference:
-
-- `/effect`: `Effect-TS/effect`
-- `/pi`: `earendil-works/pi-mono`
-
-They are reference trees, not runtime dependencies.
+See `system/APPENDIX.md`.

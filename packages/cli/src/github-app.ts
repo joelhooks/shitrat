@@ -57,9 +57,9 @@ export const loadConfig = Effect.gen(function* () {
 
   return {
     appId: appId.trim(),
-    clientId: clientId?.trim(),
     privateKey,
     installations: parseInstallationsJson(installationsRaw),
+    ...(clientId?.trim() ? { clientId: clientId.trim() } : {}),
   } satisfies ShitRatConfig
 })
 
