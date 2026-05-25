@@ -27,6 +27,7 @@ import {
   reviewCmd,
   statusCmd,
 } from "./commands/github.js"
+import { inboxCmd } from "./commands/inbox.js"
 import { errorMessage, failure, json, success } from "./response.js"
 
 const root = Command.make("shitrat", {}, () =>
@@ -130,6 +131,7 @@ const root = Command.make("shitrat", {}, () =>
     reviewCmd,
     commitFileCmd,
     commitFilesCmd,
+    inboxCmd,
   ]),
 )
 
@@ -454,6 +456,11 @@ Effect.runPromise(run)
     const stdout = capturedStdout.join("")
     const stderr = capturedStderr.join("")
     if (isJsonEnvelope(stdout)) {
+      writeStdout(stdout)
+      return
+    }
+
+    if (argv[2] === "inbox" && argv[3] === "pull" && argv.includes("--format") && argv.includes("ndjson")) {
       writeStdout(stdout)
       return
     }

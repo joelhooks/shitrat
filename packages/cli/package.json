@@ -37,19 +37,20 @@
     "@effect/cli": "^0.75.1",
     "@effect/platform": "^0.96.1",
     "@effect/platform-bun": "^0.89.0",
-    "@octokit/auth-app": "^8.2.0",
-    "@joelhooks/shitrat-core": "workspace:*",
     "@joelhooks/shitrat-adapter-claude": "workspace:*",
     "@joelhooks/shitrat-adapter-codex-desktop": "workspace:*",
     "@joelhooks/shitrat-adapter-pi": "workspace:*",
+    "@joelhooks/shitrat-core": "workspace:*",
     "@joelhooks/shitrat-defaults": "workspace:*",
+    "@octokit/auth-app": "^8.2.0",
     "@octokit/rest": "^22.0.1",
     "effect": "^3.21.2",
-    "typebox": "^1.1.38"
+    "typebox": "^1.1.38",
+    "xstate": "^5.31.1"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.74.1",
     "@earendil-works/pi-ai": "^0.74.1",
+    "@earendil-works/pi-coding-agent": "^0.74.1",
     "@earendil-works/pi-tui": "^0.74.1"
   },
   "devDependencies": {
