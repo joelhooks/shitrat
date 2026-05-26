@@ -1,0 +1,78 @@
+---
+title: ShitRat Cloudflare Pi Session Sandbox
+kind: Project
+status: idea
+created: 2026-05-22
+tags:
+  - shitrat
+  - pi
+  - cloudflare
+  - opencode
+  - sandboxing
+  - codex
+links:
+  - ../resources/opencode-do-cloudflare-remote-server.svx
+---
+
+# ShitRat Cloudflare Pi Session Sandbox
+
+## Idea
+
+Explore whether ShitRat can run Pi-style coding sessions inside Cloudflare using an OpenCode-like remote session protocol, with Cloudflare as the durable control plane and a sandboxed execution layer for tools.
+
+The motivating goal: securely use an approved OpenAI Codex subscription capability from a Cloudflare-hosted sandbox through the ShitRat/Pi harness, without leaking tokens into prompt history or giving the model ambient access to private/local machines.
+
+## Why now
+
+`opencode-do` shows a concrete proof-of-concept: OpenCode CLI/TUI can attach to a Cloudflare Worker + Durable Object remote server over HTTP/SSE, and the session can persist in Durable Object SQLite while hibernating when idle.
+
+That is close to the missing shape for ShitRat:
+
+```text
+Slack / Pi / CLI trigger
+  -> Cloudflare ShitRat session Durable Object
+  -> remote agent protocol over HTTP/SSE
+  -> sandboxed filesystem + tool executor
+  -> model access through a scoped credential bridge
+  -> progress/results back to Slack/Pi
+```
+
+## Sharp caveat
+
+This is not solved by `opencode-do` as-is. The POC README says it has no tools, no filesystem, no streaming, and uses a small Workers AI model. The valuable piece is the remote-session protocol and Durable Object lifecycle shape, not the current tool surface.
+
+The dangerous bit is the Codex subscription credential. Treat that as a capability lease, not an env var sprinkled into Worker state. Any design must answer:
+
+- where the Codex credential lives
+- how a session leases it
+- whether the token can ever be exposed to generated code or logs
+- how network/filesystem/tool access is restricted
+- how sessions are killed, audited, and garbage-collected
+
+## Candidate architecture questions
+
+- Can Pi speak an OpenCode-compatible attach/run protocol, or should ShitRat expose a Pi-native remote session protocol?
+- Does Cloudflare Agents SDK Codemode / Dynamic Worker Loaders cover enough tool execution, or do we need Cloudflare Containers for real shell/build/test workloads?
+- Should per-session files live in Durable Object SQLite, R2, memory, or a hybrid `worker-fs-mount` shape?
+- Can `isomorphic-git` plus GitHub API cover useful repo work without a full Linux shell?
+- What is the smallest safe tracer bullet: read-only repo snapshot + model reply + streamed progress, before write/edit/bash?
+
+## Non-goals for first spike
+
+- Do not mirror private local machines into Cloudflare.
+- Do not give Cloudflare Workers ambient long-lived OpenAI/Codex credentials.
+- Do not promise Bash parity until a real isolated executor exists.
+- Do not hide scope behind the word "sandbox"; name the actual boundaries.
+
+## First useful spike
+
+Build a tiny ShitRat remote session POC that:
+
+1. Creates one Durable Object session.
+2. Streams OpenCode/Pi-like events over SSE.
+3. Persists message history in DO SQLite.
+4. Uses a fake or disposable model credential first.
+5. Runs only one harmless tool, such as `list_workspace_files` against an in-memory fixture.
+6. Records an audit trail for credential/tool access.
+
+If that shape works, graduate to a scoped model lease and a real but locked-down filesystem backend.

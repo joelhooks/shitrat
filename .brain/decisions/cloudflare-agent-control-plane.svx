@@ -1,0 +1,28 @@
+---
+title: Use Cloudflare Agents as ShitRat Control Plane
+kind: Decision
+status: accepted
+created: 2026-05-20
+tags:
+  - cloudflare-agents
+  - architecture
+  - slack
+---
+
+# Use Cloudflare Agents as ShitRat Control Plane
+
+## Decision
+
+Use Cloudflare Agents SDK as the primary runtime/control plane for ShitRat's Slack presence.
+
+## Why
+
+Cloudflare Agents gives ShitRat a durable named instance, persistent state, WebSocket/RPC surfaces, scheduling, queues, and Workflow integration. That maps well to a familiar that needs to remember state, react to Slack events, and report progress without depending on a terminal session staying open.
+
+## Boundary
+
+Cloudflare does not directly own private local machine capabilities. Local pi, repo work, filesystem access, and machine actions stay behind signed private executor ingress. The executor/router boundary must stay replaceable without changing the Slack control plane.
+
+## Consequence
+
+The first repo slice should prove Slack event ingress, Durable Object state/dedupe, signed executor bridge dispatch, and threaded Slack result reporting. Cloudflare should not call private executor hosts directly; all privileged local work should route through one signed choke point. Flue remains a candidate harness behind that executor boundary for future agent sessions.

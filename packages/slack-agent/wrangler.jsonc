@@ -1,0 +1,58 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "shitrat-slack-agent",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-05-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ShitRatAgent",
+        "class_name": "ShitRatAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ShitRatAgent"]
+    }
+  ],
+  "vars": {
+    "SHITRAT_AGENT_INSTANCE": "joel",
+    "SHITRAT_REACTION_SUMMON": "shitrat",
+    "SHITRAT_REACTION_SUMMON_ALIASES": "rat",
+    "SHITRAT_REACTION_ACK": "shitrat",
+    "SHITRAT_REACTION_WATCH": "eyes"
+  },
+  "env": {
+    "staging": {
+      "name": "shitrat-slack-agent-staging",
+      "vars": {
+        "ENVIRONMENT": "staging",
+        "SHITRAT_AGENT_INSTANCE": "joel",
+        "SHITRAT_REACTION_SUMMON": "shitrat",
+        "SHITRAT_REACTION_SUMMON_ALIASES": "rat",
+        "SHITRAT_REACTION_ACK": "shitrat",
+        "SHITRAT_REACTION_WATCH": "eyes"
+      }
+    },
+    "production": {
+      "name": "shitrat-slack-agent-production",
+      "vars": {
+        "ENVIRONMENT": "production",
+        "SHITRAT_AGENT_INSTANCE": "joel",
+        "SHITRAT_REACTION_SUMMON": "shitrat",
+        "SHITRAT_REACTION_SUMMON_ALIASES": "rat",
+        "SHITRAT_REACTION_ACK": "shitrat",
+        "SHITRAT_REACTION_WATCH": "eyes"
+      }
+    }
+  }
+}

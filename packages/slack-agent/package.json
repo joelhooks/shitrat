@@ -1,0 +1,37 @@
+{
+  "name": "@joelhooks/shitrat-slack-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Joel-only ShitRat Slack familiar on Cloudflare Agents with a Flue prototype harness.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "flue:dev": "set -a; . ./.dev.vars; set +a; flue dev --target cloudflare --env ../.dev.vars",
+    "flue:build": "flue build --target cloudflare",
+    "flue:run": "set -a; . ./.dev.vars; set +a; flue run shitrat --target node --id local-prototype --env ../.dev.vars",
+    "deploy:dry": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types worker-configuration.d.ts --include-runtime false",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "wrangler deploy --dry-run"
+  },
+  "dependencies": {
+    "@flue/runtime": "^0.7.0",
+    "agents": "latest",
+    "just-bash": "^3.0.1",
+    "valibot": "^1.4.0",
+    "xstate": "^5.24.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "latest",
+    "@esbuild/darwin-arm64": "0.27.3",
+    "@flue/cli": "^0.7.0",
+    "typescript": "^5.9.2",
+    "vitest": "^4.0.0",
+    "wrangler": "latest"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

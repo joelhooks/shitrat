@@ -1,0 +1,66 @@
+---
+title: ShitRat Cloudflare Slack Agent
+kind: Project
+status: active
+created: 2026-05-20
+tags:
+  - shitrat
+  - slack
+  - cloudflare-agents
+  - digital-familiar
+---
+
+# ShitRat Cloudflare Slack Agent
+
+## Outcome
+
+Build ShitRat as the operator's Slack-native digital familiar across the workbench, primarily by building the agent inside Cloudflare with Cloudflare Agents SDK plus Flue as the headless agent harness/session layer. Private executor routing remains a later target for privileged local execution, but it should not dominate the first architecture pass.
+
+## Product boundary
+
+- One principal: the repo owner/operator.
+- One familiar instance: `ShitRatAgent:joel`.
+- Not a SaaS app.
+- Experimental tools are welcome when they give leverage.
+- Keep seams and escape hatches so experiments do not weld themselves to the house.
+
+## V1 vertical slice
+
+```text
+Slack :rat: reaction
+  -> verify Slack signature
+  -> route to ShitRatAgent:joel
+  -> dedupe event + normalize intent
+  -> ack with reaction/status
+  -> run Cloudflare-hosted agent session through Flue
+  -> produce structured result/action plan
+  -> post threaded Slack reply
+```
+
+## Speak boundary
+
+- DM and mention: direct conversation.
+- `:shitrat:` reaction: summon ShitRat on this message/thread, with `:rat:` kept as a compatibility alias.
+- `:eyes:` reaction: watch/summarize/remember thread.
+- Ambient channel observation: memory/search/digest only.
+- No auto-posting in channels without explicit summon or allowlist.
+
+## Scaffold status
+
+- Cloudflare Worker + `ShitRatAgent` Durable Object skeleton exists.
+- Slack signature verification, reaction/mention/DM intent normalization, and dedupe are implemented.
+- Signed executor dispatch and signed `/executor/result` callback verification exist as a scaffold, but this is secondary to the Cloudflare Agents SDK + Flue agent buildout.
+- Threaded Slack status/result posting is stubbed through Slack Web API calls.
+- XState v5 lifecycle sketch uses typed `assign` actions.
+- Handler integration tests cover Slack URL verification, bad Slack signatures, durable-agent routing, signed executor callbacks, and bad executor signatures.
+- Bridge tests cover signed dispatch to joelclaw executor host for future privileged-local execution.
+- Local checks passed: `pnpm types`, `pnpm test` (4 files / 14 tests), `pnpm check`, `pnpm deploy:dry`, and `pi-notes brain check`.
+- Flue prototype exists under `.flue/` with a `shitrat` webhook agent and ShitRat role prompt. It runs through `pnpm flue:dev` at `POST /agents/shitrat/<session-id>`.
+- Cloudflare AI Gateway BYOK is configured through the project gateway; the prototype calls `openai/gpt-5.5` through Gateway compat and uses `reasoning_effort: "none"`, `verbosity: "low"`, and `max_completion_tokens` for GPT-5 chat completions.
+- Verified local Flue curl returns `provider: "cloudflare-ai-gateway"`, `model: "openai/gpt-5.5"`, and upstream `reasoning_tokens: 0`.
+
+## Open implementation questions
+
+- What is the smallest Cloudflare Agents SDK + Flue vertical slice that proves ShitRat can run a durable Slack-native agent session?
+- Which ShitRat intents should be answered entirely inside Cloudflare/Flue vs escalated later for privileged local execution?
+- Which Slack scopes are required for a single-operator install vs future expansion?

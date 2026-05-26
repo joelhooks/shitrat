@@ -1,0 +1,33 @@
+---
+title: ShitRat Slack Agent Monorepo Merge
+kind: Project
+status: active
+created: 2026-05-22
+tags:
+  - shitrat
+  - slack
+  - monorepo
+  - cloudflare-agents
+---
+
+# ShitRat Slack Agent Monorepo Merge
+
+## Decision
+
+Move the live `shitrat-slack-agent` project into the ShitRat monorepo as `packages/slack-agent`.
+
+## Why
+
+The Slack bot is part of ShitRat's familiar surface, not a separate product. Keeping it in the monorepo makes shared identity/assets, future CLI wiring, and Slack deployment work local to the same system.
+
+## Mention caveat
+
+Slack `chat.postMessage` `username`/`icon_url` customization makes posts look like ShitRat, but does not create a mentionable `@ShitRat` identity. Reliable V1 summon should use `:shitrat:` reaction, with `:rat:` kept as an alias, until a real ShitRat Slack app/bot user exists.
+
+## Receipt
+
+- Copied the live Slack agent working tree into `packages/slack-agent`, excluding secrets, `node_modules`, build output, Wrangler state, and Pi session scratch.
+- Merged Slack-agent Brain notes into the monorepo root `.brain/` and removed the package-local Brain copy.
+- Scoped the package as `@joelhooks/shitrat-slack-agent`.
+- Updated the monorepo README package map.
+- Added `:shitrat:` summon defaults while keeping `:rat:` alias support.

@@ -1,0 +1,30 @@
+---
+title: Commit Sanitized Project Brain
+kind: Decision
+status: accepted
+created: 2026-05-22
+tags:
+  - brain
+  - repo-policy
+  - privacy
+---
+
+# Commit Sanitized Project Brain
+
+## Decision
+
+Commit this monorepo's `BRAIN.md` and `.brain/` as project memory.
+
+## Boundary
+
+The committed Brain is for public/project-safe knowledge only: architecture decisions, source summaries, package maps, non-sensitive run receipts, and reusable constraints.
+
+Do not store secrets, raw Slack content, private machine names, private channel/user identifiers, personal details, customer/user data, private screenshots, or sensitive operational receipts in this repo Brain.
+
+## Private context path
+
+Durable private context belongs in the global/system Brain outside this repo. Repo Brain entries should reference that private context only in sanitized form, such as "private executor host" or "private global Brain note exists".
+
+## Consequence
+
+`.gitignore` should not ignore root `.brain/` or `BRAIN.md`, but local scratch such as `.pi/`, `.env*`, Wrangler state, build output, and package-local temporary state stays ignored.

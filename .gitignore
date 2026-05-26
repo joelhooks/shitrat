@@ -30,8 +30,8 @@ report.*.json
 
 # local pi-notes/session scratch
 .pi/
-.brain/
-BRAIN.md
+.brain-private.svx
+.brain-private/
 
 # editors/os
 .idea

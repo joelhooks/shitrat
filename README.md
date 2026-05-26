@@ -12,6 +12,7 @@ packages/
   core/                      # semantic context graph, validation, compilation, parity
   defaults/                  # public ShitRat default profile
     assets/codex-pets/       # Codex Desktop pet manifests and spritesheets
+  slack-agent/               # Slack-native ShitRat Cloudflare Agent
   adapters/
     codex-desktop/           # Codex Desktop install/doctor planning
     pi/                      # Pi install/doctor planning

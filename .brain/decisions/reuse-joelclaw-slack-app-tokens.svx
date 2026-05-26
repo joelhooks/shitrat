@@ -1,0 +1,48 @@
+---
+title: Reuse Existing Slack App Tokens for ShitRat
+kind: Decision
+status: accepted
+created: 2026-05-22
+tags:
+  - slack
+  - secrets
+  - joelclaw
+---
+
+# Reuse Existing Slack App Tokens for ShitRat
+
+## Decision
+
+Reuse the existing private Slack app credentials for ShitRat's V1 Slack presence instead of creating a separate Slack bot/app immediately.
+
+Runtime mapping:
+
+- bot-token secret -> `SLACK_BOT_TOKEN`
+- user-token secret -> future explicit user-token observation/read paths
+
+Do not commit token values, local secret-store aliases, Slack raw payloads, private channel/user identifiers, or private workspace content.
+
+## Why
+
+The V1 ShitRat shape is a single-operator familiar, not a public Slack marketplace app. Reusing the existing installed app keeps setup small and avoids making another bot before scope isolation or app-level branding proves it is necessary.
+
+Slack `chat.postMessage` supports per-message `username`, `icon_url`, and `icon_emoji`, but Slack requires the app to have `chat:write.customize`, and Slack says this should only happen after a clear user action. ShitRat's speak boundary already fits that: DMs, mentions, and explicit reaction triggers.
+
+## Boundary
+
+- Bot token is the mouth for normal threaded replies.
+- User token is not the default mouth. Treat it as an explicit, reversible read/observation capability for operator-visible context.
+- Socket Mode app-token capability is not needed for the current HTTP Events API route. Only add it if ShitRat moves to Socket Mode.
+- Slack request verification still needs `SLACK_SIGNING_SECRET`; that is separate from bot/user OAuth tokens.
+
+## Consequence
+
+Before relying on custom ShitRat icon/name, verify the existing Slack app scopes include `chat:write.customize` alongside the narrower V1 event/read/write scopes. If Slack scope limits or audit boundaries get weird, create a dedicated ShitRat Slack app later with the same HTTP contract.
+
+## Execution receipt: 2026-05-22
+
+- `chat:write.customize` was confirmed in the Slack app permissions UI.
+- A 128x128 transparent `shitrat` emoji was extracted from the ShitRat Codex pet spritesheet in `shitrat-cli/packages/defaults/assets/codex-pets/shitrat/spritesheet.webp`.
+- The workspace custom emoji `:shitrat:` was added successfully.
+- A permanent noindex icon asset was published at `https://shitrat-slack-icon.wzrrd.sh/shitrat-emoji.png` for `chat.postMessage` `icon_url` usage.
+- A ShitRat-authored test post landed in a private test channel with `username: "ShitRat"`, repo-derived icon art, and a `:shitrat:` reaction readback.

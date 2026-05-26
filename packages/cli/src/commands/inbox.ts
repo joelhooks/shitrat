@@ -144,10 +144,11 @@ const fileEventWriter = (out: string) => {
 const stdoutEventWriter = (value: unknown) => printNdjson(value)
 
 const janitorPrompt = (mode: "daily" | "dumpster", events: string) => {
+  const operatorFormat = "Return an executive summary first, then context, reasoning, grouped items, and Front thread links for every actionable/archive group. Joel prefers grouped decisions with receipts over flat ticket dumps."
   if (mode === "dumpster") {
-    return `Analyze ${events}. Metadata-only inbox dumpster pack. Default stance: archive old sludge unless there is a concrete keep reason. Do not mutate. Return JSON with archiveByDefault, keepReasons, fetchBeforeArchive, ruleCandidates. Keep/fetch money, tax, legal, account/security, school/family, active human/work threads, unresolved failures/incidents.`
+    return `Analyze ${events}. Metadata-only inbox dumpster pack. Default stance: archive old sludge unless there is a concrete keep reason. Do not mutate. ${operatorFormat} Return JSON with executiveSummary, context, reasoning, groupedItems, archiveByDefault, keepReasons, fetchBeforeArchive, ruleCandidates. Keep/fetch money, tax, legal, account/security, school/family, active human/work threads, unresolved failures/incidents.`
   }
-  return `Analyze ${events}. Metadata-only daily inbox janitor pack. Do not mutate. Return JSON with dealWithFirst, summarizeStreams, highConfidenceArchiveCandidates, needsRule, fetchThreadBodies. Be conservative around money/security/account/school/family/legal/work; archive only obvious trash from metadata.`
+  return `Analyze ${events}. Metadata-only daily inbox janitor pack. Do not mutate. ${operatorFormat} Return JSON with executiveSummary, context, reasoning, groupedItems, dealWithFirst, summarizeStreams, highConfidenceArchiveCandidates, needsRule, fetchThreadBodies. Be conservative around money/security/account/school/family/legal/work; archive only obvious trash from metadata.`
 }
 
 const janitorModeOption = Options.choice("mode", ["daily", "dumpster"] as const).pipe(

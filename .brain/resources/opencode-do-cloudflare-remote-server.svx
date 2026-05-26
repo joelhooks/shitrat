@@ -1,0 +1,59 @@
+---
+title: opencode-do Cloudflare Remote Server POC
+kind: Resource
+created: 2026-05-22
+source: https://github.com/southpolesteve/opencode-do
+tags:
+  - opencode
+  - cloudflare
+  - durable-objects
+  - remote-agent-sessions
+---
+
+# opencode-do Cloudflare Remote Server POC
+
+Source: <https://github.com/southpolesteve/opencode-do>
+
+## What it demonstrates
+
+`opencode-do` is a proof-of-concept for running OpenCode's remote server API on Cloudflare Workers + Durable Objects, then connecting with:
+
+```bash
+opencode attach <worker-url>
+opencode run --attach <worker-url> "..."
+```
+
+The useful shape:
+
+```text
+OpenCode CLI/TUI
+  -> HTTP + SSE remote server API
+  -> Cloudflare Worker router
+  -> Session Durable Object
+  -> Durable Object SQLite message persistence
+  -> model call
+```
+
+## Source-grounded constraints
+
+The README explicitly calls it a POC with these limits:
+
+- rate limited demo
+- no Read/Write/Edit/Bash tools
+- no filesystem
+- single Workers AI model in the demo
+- no response streaming in the current POC
+
+The README also points at possible extensions:
+
+- `worker-fs-mount` with Durable Object, R2, or memory-backed filesystems
+- Dynamic Worker Loaders / Cloudflare Agents SDK Codemode for isolated code execution
+- `isomorphic-git` plus R2/DO storage for Git operations
+- Cloudflare Containers for heavier shell/build/test workloads
+- AI Gateway for stronger external models
+
+## Why this matters for ShitRat
+
+This is interesting less as production code and more as a protocol receipt: a coding-agent TUI can attach to a Cloudflare Durable Object session over HTTP/SSE, with state persisted in DO SQLite and the compute hibernating when idle.
+
+For ShitRat, that suggests a Cloudflare-hosted session control plane could exist without a permanent local executor process, while privileged or heavyweight work remains separately sandboxed.

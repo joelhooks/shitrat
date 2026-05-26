@@ -1,0 +1,28 @@
+---
+title: Slack Platform Constraints
+kind: Area
+created: 2026-05-20
+tags:
+  - slack
+  - oauth
+  - security
+---
+
+# Slack Platform Constraints
+
+## Current source-grounded facts
+
+- Bot tokens see bot-perspectival events, usually only conversations the bot is party to.
+- User-level omnipresence requires user OAuth scopes and only covers conversations the authorized user can see or belongs to.
+- Socket Mode changes delivery, not visibility.
+- Slack event handlers must ack quickly.
+- Message observation is split by public channel, private channel, DM, and MPIM scopes/events.
+
+## Design consequence
+
+ShitRat should use split identity:
+
+- user-token ears for operator-visible context
+- bot-token mouth for posting as ShitRat
+
+The runtime must preserve privacy, revocation, scope failure, rate limit, and dedupe states explicitly.
