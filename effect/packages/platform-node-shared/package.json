@@ -50,7 +50,7 @@
   "dependencies": {
     "@parcel/watcher": "^2.5.1",
     "multipasta": "^0.2.7",
-    "ws": "^8.18.2"
+    "ws": "^8.20.1"
   },
   "peerDependencies": {
     "@effect/cluster": "workspace:^",
