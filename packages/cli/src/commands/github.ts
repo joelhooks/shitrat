@@ -152,6 +152,7 @@ interface PreparedCommitFile {
   readonly size: number
   readonly sha256: string
   readonly base64: string
+  readonly gitMode: "100644" | "100755"
 }
 
 const prepareCommitFile = (
@@ -179,6 +180,7 @@ const prepareCommitFile = (
         size: bytes.length,
         sha256: createHash("sha256").update(bytes).digest("hex"),
         base64: bytes.toString("base64"),
+        gitMode: info.mode & 0o111 ? "100755" : "100644",
       }
     },
     catch: (error) => (error instanceof Error ? error : new Error(String(error))),
@@ -783,7 +785,7 @@ export const commitFilesCmd = Command.make(
             base_tree: baseCommit.data.tree.sha,
             tree: blobs.map(({ prepared, sha }) => ({
               path: prepared.repoPath,
-              mode: "100644" as const,
+              mode: prepared.gitMode,
               type: "blob" as const,
               sha,
             })),
