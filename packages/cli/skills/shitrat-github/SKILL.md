@@ -15,6 +15,7 @@ Prefer ShitRat for published agent-authored GitHub comments/reviews:
 shitrat status skillrecordings/migrate-egghead
 shitrat comment skillrecordings/migrate-egghead 26 --body-file comment.md
 shitrat review skillrecordings/egghead-next 1608 --event REQUEST_CHANGES --body-file review.md
+shitrat merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch"
 shitrat commit-file joelhooks/shitrat-cli --branch main --message "docs: update notes" --file README.md
 shitrat commit-files joelhooks/shitrat-cli --branch main --message "docs: update docs" --file README.md --file docs/shitrat-commit-flow.md
 ```
@@ -24,6 +25,7 @@ If the pi extension is loaded, prefer the tools:
 - `shitrat_status`
 - `shitrat_comment`
 - `shitrat_review`
+- `shitrat_merge`
 - `shitrat_commit_file`
 - `shitrat_commit_files`
 
@@ -33,7 +35,8 @@ If the pi extension is loaded, prefer the tools:
 - Do not use Joel's `gh pr review` when the desired actor is ShitRat.
 - Use `shitrat status <owner/repo>` first when repo access is uncertain.
 - Use `--body-file` for non-trivial Markdown so shell quoting does not mangle review text.
-- Use `shitrat commit-file ... --dry-run` before writing unless Joel explicitly asked to commit as ShitRat.
+- Use `--dry-run` before writing unless Joel explicitly asked to commit/merge as ShitRat.
+- `merge` uses GitHub's merge endpoint to merge one branch into another as `shitratgit[bot]`, so do not fake a merge by replaying branch contents onto `main`.
 - `commit-file` is for small, intentional single-file commits. `commit-files` is for small atomic multi-file GitHub API commits. For large/complex changes, commit locally and push normally unless Joel specifically wants ShitRat API commits.
 - Only post comments/reviews/commits when the user asked to publish or the workflow clearly requires it.
 

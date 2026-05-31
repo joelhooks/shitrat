@@ -49,10 +49,12 @@ The CLI keeps JSON-only output:
 packages/cli/dist/shitrat doctor --dry-run
 packages/cli/dist/shitrat compile --target codex-desktop --dry-run
 packages/cli/dist/shitrat install codex-desktop --dry-run
+packages/cli/dist/shitrat update pi --dry-run
+packages/cli/dist/shitrat merge joelhooks/shitrat-cli --base main --head feature-branch --dry-run
 packages/cli/dist/shitrat parity
 ```
 
-Real install writes are intentionally disabled in this cut. Use dry-run output and receipts first.
+Real install/update writes require `--yes`; dry-run output and receipts come first.
 
 ## Public Defaults and Private Overlays
 

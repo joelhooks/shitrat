@@ -99,6 +99,20 @@ const summarizeShitRatResult = (value: unknown): string => {
   const commitUrl = commit ? stringValue(commit.html_url) : undefined
   const singleFile = isRecord(result.file) ? result.file : undefined
   const singleFilePath = singleFile ? stringValue(singleFile.repo_path) : undefined
+  const base = stringValue(result.base)
+  const head = stringValue(result.head)
+
+  if (command.startsWith("shitrat merge")) {
+    return [
+      dryRun ? "🧪 Dry run: ShitRat merge ready" : "✅ ShitRat merged branch",
+      repo,
+      base && head ? `${head} → ${base}` : undefined,
+      commitSha ? `Commit: ${commitSha}` : undefined,
+      commitUrl,
+    ]
+      .filter(Boolean)
+      .join("\n")
+  }
 
   if (command.startsWith("shitrat commit-files")) {
     return [
@@ -174,6 +188,7 @@ export default function shitratExtension(pi: ExtensionAPI) {
       const items = [
         "installations",
         "status skillrecordings/migrate-egghead",
+        "merge skillrecordings/migrate-egghead --base main --head feature-branch --dry-run",
         "commit-file skillrecordings/migrate-egghead --branch main --message 'message' --file path --dry-run",
         "commit-files skillrecordings/migrate-egghead --branch main --message 'message' --file path --file other --dry-run",
       ]
@@ -315,6 +330,33 @@ export default function shitratExtension(pi: ExtensionAPI) {
       if (params.dryRun) args.push("--dry-run")
 
       const result = await runShitRat(pi, args, signal, params.cwd ?? ctx.cwd)
+      return toolResult(result)
+    },
+  })
+
+  pi.registerTool({
+    name: "shitrat_merge",
+    label: "ShitRat Merge",
+    description: "Merge one branch into another as shitratgit[bot].",
+    promptSnippet: "Merge GitHub branches as shitratgit[bot] via the ShitRat GitHub App",
+    promptGuidelines: [
+      "Use shitrat_merge instead of replaying branch contents when Joel wants the merge authored by ShitRat's GitHub App identity.",
+      "Prefer dryRun: true first unless the user explicitly asked to merge.",
+      "This uses GitHub's merge endpoint, so it requires a clean server-side merge.",
+    ],
+    parameters: Type.Object({
+      repo: Type.String({ description: "Repository in owner/repo form" }),
+      base: Type.Optional(Type.String({ description: "Base branch to merge into; defaults to main" })),
+      head: Type.String({ description: "Head branch or ref to merge from" }),
+      message: Type.Optional(Type.String({ description: "Merge commit message" })),
+      dryRun: Type.Optional(Type.Boolean({ description: "Preview without writing to GitHub" })),
+    }),
+    async execute(_toolCallId, params, signal) {
+      const args = ["merge", params.repo, "--base", params.base ?? "main", "--head", params.head]
+      if (params.message) args.push("--message", params.message)
+      if (params.dryRun) args.push("--dry-run")
+
+      const result = await runShitRat(pi, args, signal)
       return toolResult(result)
     },
   })

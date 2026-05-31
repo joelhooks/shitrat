@@ -57,6 +57,15 @@ bun run src/cli.ts comment skillrecordings/migrate-egghead 26 --body-file commen
 # Create PR review as shitratgit[bot]
 bun run src/cli.ts review skillrecordings/egghead-next 1608 --event REQUEST_CHANGES --body-file review.md
 
+# Preview a branch merge as shitratgit[bot]
+bun run src/cli.ts merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch" --dry-run
+
+# Merge a branch as shitratgit[bot]
+bun run src/cli.ts merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch"
+
+# Preview/update ShitRat harness install files
+bun run src/cli.ts update pi --dry-run
+
 # Preview one-file GitHub API commit as shitratgit[bot]
 bun run src/cli.ts commit-file joelhooks/shitrat-cli --branch main --message "docs: update README" --file README.md --dry-run
 
@@ -91,7 +100,7 @@ More detail: [`docs/hunk-diff-viewer.md`](docs/hunk-diff-viewer.md)
 
 This repo includes:
 
-- `extensions/shitrat`: pi extension that registers `shitrat_status`, `shitrat_comment`, `shitrat_review`, `shitrat_commit_file`, and `shitrat_commit_files` tools.
+- `extensions/shitrat`: pi extension that registers `shitrat_status`, `shitrat_comment`, `shitrat_review`, `shitrat_merge`, `shitrat_commit_file`, and `shitrat_commit_files` tools.
 - `skills/shitrat-github`: skill instructions for using ShitRat as the GitHub actor.
 
 Install locally:

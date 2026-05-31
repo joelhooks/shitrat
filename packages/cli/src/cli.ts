@@ -24,6 +24,7 @@ import {
   commitFilesCmd,
   commentCmd,
   installationsCmd,
+  mergeCmd,
   reviewCmd,
   statusCmd,
 } from "./commands/github.js"
@@ -47,10 +48,16 @@ const root = Command.make("shitrat", {}, () =>
               comment: "shitrat comment <owner/repo> <issue-or-pr-number> --body-file <path>",
               review:
                 "shitrat review <owner/repo> <pull-number> --event APPROVE|REQUEST_CHANGES|COMMENT --body-file <path>",
+              merge:
+                "shitrat merge <owner/repo> --base main --head <branch> --message <message>",
               commit_file:
                 "shitrat commit-file <owner/repo> --branch main --message <message> --file <local-path> [--path <repo-path>]",
               commit_files:
                 "shitrat commit-files <owner/repo> --branch main --message <message> --file <path> [--file <path>...]",
+              install:
+                "shitrat install pi|claude|codex-desktop --dry-run",
+              update:
+                "shitrat update pi|claude|codex-desktop --dry-run",
             },
             secrets: [
               "shitrat_github_app_id",
@@ -129,6 +136,7 @@ const root = Command.make("shitrat", {}, () =>
     statusCmd,
     commentCmd,
     reviewCmd,
+    mergeCmd,
     commitFileCmd,
     commitFilesCmd,
     inboxCmd,
@@ -240,7 +248,7 @@ const writeInstallPlan = async (
 
 const handleNativeShitRatCommand = async (args: readonly string[]): Promise<boolean> => {
   const subcommand = args[2]
-  if (!subcommand || !["compile", "doctor", "install", "profile", "parity"].includes(subcommand)) {
+  if (!subcommand || !["compile", "doctor", "install", "update", "profile", "parity"].includes(subcommand)) {
     return false
   }
 
@@ -288,16 +296,16 @@ const handleNativeShitRatCommand = async (args: readonly string[]): Promise<bool
       return true
     }
 
-    if (subcommand === "install") {
+    if (subcommand === "install" || subcommand === "update") {
       const target = args[3]
       if (!isHarnessTarget(target)) {
         writeStdout(
           json(
             failure(
               args.slice(2).join(" "),
-              "Missing or invalid install target.",
+              `Missing or invalid ${subcommand} target.`,
               "INVALID_TARGET",
-              "Use `shitrat install codex-desktop --dry-run` before any real install.",
+              `Use \`shitrat ${subcommand} codex-desktop --dry-run\` before writing files.`,
             ),
           ),
         )
@@ -311,7 +319,7 @@ const handleNativeShitRatCommand = async (args: readonly string[]): Promise<bool
             json(
               failure(
                 args.slice(2).join(" "),
-                "Real installs require --yes.",
+                `Real ${subcommand}s require --yes.`,
                 "INSTALL_CONFIRMATION_REQUIRED",
                 "Run with --dry-run first, inspect planned_files, then rerun with --yes if the plan is correct.",
               ),
@@ -332,6 +340,7 @@ const handleNativeShitRatCommand = async (args: readonly string[]): Promise<bool
         json(
           success(args.slice(2).join(" "), {
             target,
+            command: subcommand,
             config_path: configPath,
             dry_run: false,
             written_files,

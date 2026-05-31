@@ -63,6 +63,15 @@ const createBranchFromOption = Options.text("create-branch-from").pipe(
   Options.optional,
 )
 
+const baseOption = Options.text("base").pipe(
+  Options.withDescription("Base branch to merge into"),
+  Options.withDefault("main"),
+)
+
+const headOption = Options.text("head").pipe(
+  Options.withDescription("Head branch or ref to merge from"),
+)
+
 const dryRunOption = Options.boolean("dry-run").pipe(
   Options.withDescription("Preview the commit payload without contacting GitHub or writing anything"),
 )
@@ -881,6 +890,111 @@ export const commitFilesCmd = Command.make(
       ),
     ),
 ).pipe(Command.withDescription("Atomically commit multiple local files to GitHub as ShitRat"))
+
+export const mergeCmd = Command.make(
+  "merge",
+  {
+    repo: repoArg,
+    base: baseOption,
+    head: headOption,
+    message: Options.text("message").pipe(
+      Options.withDescription("Merge commit message; defaults to GitHub's merge message"),
+      Options.optional,
+    ),
+    dryRun: dryRunOption,
+  },
+  ({ repo, base, head, message, dryRun }) =>
+    Effect.gen(function* () {
+      const repoRef = parseRepo(repo)
+      const baseBranch = normalizeGitRef(base)
+      const headRef = normalizeGitRef(head)
+      const command = `merge ${repoRef.fullName}`
+      const mergeMessage = optionToUndefined(message)
+
+      if (dryRun) {
+        yield* printSuccess(
+          command,
+          {
+            dry_run: true,
+            repo: repoRef.fullName,
+            base: baseBranch,
+            head: headRef,
+            message: mergeMessage,
+            github_write: false,
+          },
+          [
+            {
+              command: "merge <repo> --base <base-branch> --head <head-branch> [--message <message>]",
+              description: "Merge the head branch into the base branch as ShitRat",
+              params: {
+                repo: { value: repoRef.fullName, required: true },
+                base: { value: baseBranch, default: "main" },
+                head: { value: headRef, required: true },
+                message: { description: "Merge commit message" },
+              },
+            },
+          ],
+        )
+        return
+      }
+
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const response = yield* Effect.tryPromise({
+        try: () =>
+          octokit.rest.repos.merge({
+            owner: repoRef.owner,
+            repo: repoRef.repo,
+            base: baseBranch,
+            head: headRef,
+            ...(mergeMessage ? { commit_message: mergeMessage } : {}),
+          }),
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      })
+
+      yield* printSuccess(
+        command,
+        {
+          repo: repoRef.fullName,
+          base: baseBranch,
+          head: headRef,
+          commit: {
+            sha: response.data.sha,
+            html_url: response.data.html_url,
+            message: response.data.commit.message,
+          },
+          actor: "shitratgit[bot]",
+          installation_id: token.installationId,
+        },
+        [
+          {
+            command: "status <repo>",
+            description: "Verify ShitRat still has access to this repository",
+            params: { repo: { value: repoRef.fullName, required: true } },
+          },
+        ],
+      )
+    }).pipe(
+      Effect.catchAll((error) =>
+        printFailure(
+          `merge ${repo}`,
+          error,
+          "MERGE_FAILED",
+          "Verify Contents: write permission, branch names, installation access, and that GitHub can merge the branches cleanly. Use --dry-run first if unsure.",
+          [
+            {
+              command: "merge <repo> --base <base-branch> --head <head-branch> [--message <message>] [--dry-run]",
+              description: "Preview or retry merging a branch as ShitRat",
+              params: {
+                repo: { value: repo, required: true },
+                base: { default: "main" },
+                head: { required: true },
+              },
+            },
+          ],
+        ),
+      ),
+    ),
+).pipe(Command.withDescription("Merge one branch into another as ShitRat"))
 
 export const reviewCmd = Command.make(
   "review",
