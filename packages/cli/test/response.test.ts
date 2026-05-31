@@ -202,6 +202,26 @@ describe("cli json output", () => {
     }
   })
 
+  test("updates Pi APPEND_SYSTEM.md in a delimited block while preserving local instructions", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "shitrat-pi-update-test-"))
+    await writeFile(join(dir, "APPEND_SYSTEM.md"), "local operator note\n", "utf8")
+
+    try {
+      const result = await runCli("update", "pi", "--home", dir, "--yes")
+      const updated = await Bun.file(join(dir, "APPEND_SYSTEM.md")).text()
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(result.json.ok).toBe(true)
+      expect(result.stdout).toContain('"action": "merge"')
+      expect(updated).toContain("<!-- shitrat:start -->")
+      expect(updated).toContain("<!-- shitrat:end -->")
+      expect(updated).toContain("local operator note")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test("reports parity across harnesses", async () => {
     const result = await runCli("parity")
 

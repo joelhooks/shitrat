@@ -224,6 +224,34 @@ const planInstall = (profile: FamiliarProfile, target: HarnessTarget, home?: str
 const expandHome = (value: string): string =>
   value === "~" ? homedir() : value.startsWith("~/") ? path.join(homedir(), value.slice(2)) : value
 
+const shitRatBlockStart = "<!-- shitrat:start -->"
+const shitRatBlockEnd = "<!-- shitrat:end -->"
+const preservedLocalInstructionsHeading = "\n---\n\n## Existing Local Instructions Preserved"
+
+const wrapShitRatBlock = (content: string): string =>
+  `${shitRatBlockStart}\n${content.trimEnd()}\n${shitRatBlockEnd}\n`
+
+const mergeShitRatBlock = (existing: string | undefined, content: string): string => {
+  const block = wrapShitRatBlock(content)
+  if (!existing) return block
+
+  const start = existing.indexOf(shitRatBlockStart)
+  const end = existing.indexOf(shitRatBlockEnd)
+  if (start >= 0 && end > start) {
+    return `${existing.slice(0, start)}${block}${existing.slice(end + shitRatBlockEnd.length).replace(/^\n?/, "")}`
+  }
+
+  const preservedIndex = existing.indexOf(preservedLocalInstructionsHeading)
+  if (preservedIndex >= 0) {
+    return `${block}${existing.slice(preservedIndex)}`
+  }
+
+  return `${block}\n---\n\n## Existing Local Instructions Preserved\n\n${existing.trimEnd()}\n`
+}
+
+const shouldMergeShitRatBlock = (targetPath: string): boolean =>
+  path.basename(targetPath) === "APPEND_SYSTEM.md"
+
 const writeInstallPlan = async (
   plan: ReturnType<typeof planInstall>,
 ): Promise<readonly { path: string; backup_path?: string; action: string }[]> => {
@@ -234,11 +262,15 @@ const writeInstallPlan = async (
     const targetPath = expandHome(file.path)
     await mkdir(path.dirname(targetPath), { recursive: true })
     const backupPath = existsSync(targetPath) ? `${targetPath}.shitrat-backup-${timestamp}` : undefined
+    const existing = existsSync(targetPath) ? await readFile(targetPath, "utf8") : undefined
     if (backupPath) await copyFile(targetPath, backupPath)
-    await writeFile(targetPath, file.content, "utf8")
+    const nextContent = shouldMergeShitRatBlock(targetPath)
+      ? mergeShitRatBlock(existing, file.content)
+      : file.content
+    await writeFile(targetPath, nextContent, "utf8")
     written.push({
       path: targetPath,
-      action: file.action,
+      action: shouldMergeShitRatBlock(targetPath) ? "merge" : file.action,
       ...(backupPath ? { backup_path: backupPath } : {}),
     })
   }

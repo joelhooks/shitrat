@@ -54,7 +54,7 @@ packages/cli/dist/shitrat merge joelhooks/shitrat-cli --base main --head feature
 packages/cli/dist/shitrat parity
 ```
 
-Real install/update writes require `--yes`; dry-run output and receipts come first.
+Real install/update writes require `--yes`; dry-run output and receipts come first. Pi `APPEND_SYSTEM.md` updates are delimited with `<!-- shitrat:start -->` / `<!-- shitrat:end -->` and preserve local instructions outside that block.
 
 ## Public Defaults and Private Overlays
 

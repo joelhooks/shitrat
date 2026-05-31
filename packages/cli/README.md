@@ -64,6 +64,7 @@ bun run src/cli.ts merge joelhooks/shitrat-cli --base main --head feature-branch
 bun run src/cli.ts merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch"
 
 # Preview/update ShitRat harness install files
+# Pi APPEND_SYSTEM.md updates replace only the delimited ShitRat block and preserve local instructions.
 bun run src/cli.ts update pi --dry-run
 
 # Preview one-file GitHub API commit as shitratgit[bot]
