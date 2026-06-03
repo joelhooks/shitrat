@@ -72,7 +72,9 @@ shitrat commit-files joelhooks/shitrat-cli \
   --file docs/shitrat-commit-flow.md
 ```
 
-`commit-files` uses Git blobs + trees under the hood, then advances the branch ref once. That makes the batch atomic instead of one commit per file.
+`commit-files` uses Git blobs + trees under the hood on existing branches, then advances the branch ref once. That makes the batch atomic instead of one commit per file.
+
+For a brand-new empty GitHub repo, `commit-files` detects the empty-ref state and creates one root commit with a temporary local git push authenticated as the ShitRat app. No manual README seed commit.
 
 Safety caps: each file is capped at 5 MiB and each batch is capped at 10 MiB. This keeps the GitHub API path for small agent commits, not giant artifact nonsense.
 

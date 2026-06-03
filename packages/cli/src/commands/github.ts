@@ -1,7 +1,8 @@
 import { Args, Command, Options } from "@effect/cli"
 import { Console, Effect, Option } from "effect"
 import { createHash } from "node:crypto"
-import { lstat } from "node:fs/promises"
+import { chmod, lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import path from "node:path"
 import {
   createRepoOctokit,
@@ -189,6 +190,12 @@ const prepareCommitFile = (
 const isNotFoundError = (error: unknown): boolean =>
   typeof error === "object" && error !== null && "status" in error && error.status === 404
 
+const isEmptyRepositoryError = (error: unknown): boolean => {
+  if (typeof error !== "object" || error === null || !("status" in error)) return false
+  const message = "message" in error ? String(error.message) : ""
+  return error.status === 409 && /Git Repository is empty/i.test(message)
+}
+
 const isAlreadyExistsError = (error: unknown): boolean => {
   if (typeof error !== "object" || error === null || !("status" in error)) return false
   const message = "message" in error ? String(error.message) : ""
@@ -221,13 +228,34 @@ const normalizeGitRef = (value: string): string => {
 }
 
 interface BranchHead {
-  readonly headSha: string
+  readonly headSha: string | undefined
   readonly createdBranch: boolean
+  readonly repositoryEmpty: boolean
 }
 
 interface CommitBranchBase {
-  readonly headSha: string
+  readonly headSha: string | undefined
   readonly branchExists: boolean
+  readonly repositoryEmpty: boolean
+}
+
+const repositoryHasNoRefs = async (
+  octokit: GitHubOctokit,
+  repoRef: ReturnType<typeof parseRepo>,
+  targetBranch: string,
+): Promise<boolean> => {
+  try {
+    await octokit.rest.git.getRef({
+      owner: repoRef.owner,
+      repo: repoRef.repo,
+      ref: `heads/${targetBranch}`,
+    })
+    return false
+  } catch (error) {
+    if (isEmptyRepositoryError(error)) return true
+    if (isNotFoundError(error)) return false
+    throw error
+  }
 }
 
 const ensureBranch = (
@@ -244,12 +272,15 @@ const ensureBranch = (
           repo: repoRef.repo,
           branch: targetBranch,
         })
-        return { headSha: branch.data.commit.sha, createdBranch: false }
+        return { headSha: branch.data.commit.sha, createdBranch: false, repositoryEmpty: false }
       } catch (error) {
         if (!isNotFoundError(error)) throw error
 
         const base = optionToUndefined(createBranchFrom)
         if (!base) {
+          if (await repositoryHasNoRefs(octokit, repoRef, targetBranch)) {
+            return { headSha: undefined, createdBranch: true, repositoryEmpty: true }
+          }
           throw new Error(
             `Branch '${targetBranch}' does not exist. Pass --create-branch-from <base-branch> to create it.`,
           )
@@ -269,7 +300,7 @@ const ensureBranch = (
             ref: `refs/heads/${targetBranch}`,
             sha: baseRef.data.object.sha,
           })
-          return { headSha: baseRef.data.object.sha, createdBranch: true }
+          return { headSha: baseRef.data.object.sha, createdBranch: true, repositoryEmpty: false }
         } catch (createError) {
           if (!isAlreadyExistsError(createError)) throw createError
           const branch = await octokit.rest.repos.getBranch({
@@ -277,7 +308,7 @@ const ensureBranch = (
             repo: repoRef.repo,
             branch: targetBranch,
           })
-          return { headSha: branch.data.commit.sha, createdBranch: false }
+          return { headSha: branch.data.commit.sha, createdBranch: false, repositoryEmpty: false }
         }
       }
     },
@@ -298,12 +329,15 @@ const resolveBranchBase = (
           repo: repoRef.repo,
           branch: targetBranch,
         })
-        return { headSha: branch.data.commit.sha, branchExists: true }
+        return { headSha: branch.data.commit.sha, branchExists: true, repositoryEmpty: false }
       } catch (error) {
         if (!isNotFoundError(error)) throw error
 
         const base = optionToUndefined(createBranchFrom)
         if (!base) {
+          if (await repositoryHasNoRefs(octokit, repoRef, targetBranch)) {
+            return { headSha: undefined, branchExists: false, repositoryEmpty: true }
+          }
           throw new Error(
             `Branch '${targetBranch}' does not exist. Pass --create-branch-from <base-branch> to create it.`,
           )
@@ -315,7 +349,7 @@ const resolveBranchBase = (
           repo: repoRef.repo,
           ref: `heads/${baseBranch}`,
         })
-        return { headSha: baseRef.data.object.sha, branchExists: false }
+        return { headSha: baseRef.data.object.sha, branchExists: false, repositoryEmpty: false }
       }
     },
     catch: (error) => (error instanceof Error ? error : new Error(String(error))),
@@ -371,6 +405,111 @@ const preflightRepoPath = async (
     }
   }
 }
+
+const runGit = async (
+  args: readonly string[],
+  options: { readonly cwd: string; readonly env?: Record<string, string> },
+): Promise<string> => {
+  const proc = Bun.spawn(["git", ...args], {
+    cwd: options.cwd,
+    env: { ...process.env, ...options.env },
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ])
+
+  if (exitCode !== 0) {
+    throw new Error(`git ${args[0] ?? "command"} failed: ${stderr || stdout}`.trim())
+  }
+  return stdout.trim()
+}
+
+interface EmptyRepositoryCommitResult {
+  readonly sha: string
+  readonly html_url: string
+}
+
+const commitFilesToEmptyRepository = (
+  repoRef: ReturnType<typeof parseRepo>,
+  targetBranch: string,
+  message: string,
+  preparedFiles: readonly PreparedCommitFile[],
+  installationToken: string,
+): Effect.Effect<EmptyRepositoryCommitResult, Error> =>
+  Effect.tryPromise({
+    try: async () => {
+      const repoDir = await mkdtemp(path.join(tmpdir(), "shitrat-empty-repo-"))
+      const authDir = await mkdtemp(path.join(tmpdir(), "shitrat-git-auth-"))
+      const askpassPath = path.join(authDir, "askpass.sh")
+
+      try {
+        for (const prepared of preparedFiles) {
+          const targetPath = path.resolve(repoDir, prepared.repoPath)
+          const relative = path.relative(repoDir, targetPath)
+          if (relative.startsWith("..") || path.isAbsolute(relative)) {
+            throw new Error(`Invalid repository path '${prepared.repoPath}'.`)
+          }
+          await mkdir(path.dirname(targetPath), { recursive: true })
+          const mode = prepared.gitMode === "100755" ? 0o755 : 0o644
+          await writeFile(targetPath, Buffer.from(prepared.base64, "base64"), { mode })
+          if (prepared.gitMode === "100755") await chmod(targetPath, mode)
+        }
+
+        await writeFile(
+          askpassPath,
+          "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' x-access-token ;;\n  *) printf '%s\\n' \"$SHITRAT_GITHUB_TOKEN\" ;;\nesac\n",
+          { mode: 0o700 },
+        )
+
+        await runGit(["init", "-b", targetBranch], { cwd: repoDir })
+        await runGit(["config", "user.name", "shitratgit[bot]"], { cwd: repoDir })
+        await runGit(
+          ["config", "user.email", "286405550+shitratgit[bot]@users.noreply.github.com"],
+          { cwd: repoDir },
+        )
+        await runGit(["add", "--", "."], { cwd: repoDir })
+        await runGit(["commit", "-m", message], {
+          cwd: repoDir,
+          env: {
+            GIT_AUTHOR_NAME: "shitratgit[bot]",
+            GIT_AUTHOR_EMAIL: "286405550+shitratgit[bot]@users.noreply.github.com",
+            GIT_COMMITTER_NAME: "shitratgit[bot]",
+            GIT_COMMITTER_EMAIL: "286405550+shitratgit[bot]@users.noreply.github.com",
+          },
+        })
+        const sha = await runGit(["rev-parse", "HEAD"], { cwd: repoDir })
+        await runGit(
+          [
+            "push",
+            `https://github.com/${repoRef.owner}/${repoRef.repo}.git`,
+            `HEAD:refs/heads/${targetBranch}`,
+          ],
+          {
+            cwd: repoDir,
+            env: {
+              GIT_ASKPASS: askpassPath,
+              GIT_TERMINAL_PROMPT: "0",
+              SHITRAT_GITHUB_TOKEN: installationToken,
+            },
+          },
+        )
+
+        return {
+          sha,
+          html_url: `https://github.com/${repoRef.fullName}/commit/${sha}`,
+        }
+      } finally {
+        await rm(repoDir, { recursive: true, force: true })
+        await rm(authDir, { recursive: true, force: true })
+      }
+    },
+    catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+  })
 
 export const installationsCmd = Command.make("installations", {}, () =>
   Effect.gen(function* () {
@@ -590,7 +729,7 @@ export const commitFileCmd = Command.make(
 
             return existing.data.sha
           } catch (error) {
-            if (isNotFoundError(error)) return undefined
+            if (isNotFoundError(error) || isEmptyRepositoryError(error)) return undefined
             throw error
           }
         },
@@ -753,87 +892,116 @@ export const commitFilesCmd = Command.make(
       const { octokit, token } = yield* createRepoOctokit(repoRef)
       const branchBase = yield* resolveBranchBase(octokit, repoRef, targetBranch, createBranchFrom)
 
-      const commitResult = yield* Effect.tryPromise({
-        try: async () => {
-          const baseCommit = await octokit.rest.git.getCommit({
-            owner: repoRef.owner,
-            repo: repoRef.repo,
-            commit_sha: branchBase.headSha,
-          })
-
-          await Promise.all(
-            preparedFiles.map((prepared) =>
-              preflightRepoPath(octokit, repoRef, branchBase.headSha, prepared.repoPath),
-            ),
+      const commitResult = branchBase.repositoryEmpty
+        ? yield* commitFilesToEmptyRepository(
+            repoRef,
+            targetBranch,
+            message,
+            preparedFiles,
+            token.token,
+          ).pipe(
+            Effect.map((commit) => ({
+              commit,
+              createdBranch: true,
+              emptyRepository: true,
+            })),
           )
+        : yield* Effect.tryPromise({
+            try: async () => {
+              const baseHeadSha = branchBase.headSha
+              if (!baseHeadSha) throw new Error("Resolved branch base is missing a commit sha.")
 
-          const blobs = await Promise.all(
-            preparedFiles.map(async (prepared) => {
-              const blob = await octokit.rest.git.createBlob({
+              const baseCommit = await octokit.rest.git.getCommit({
                 owner: repoRef.owner,
                 repo: repoRef.repo,
-                content: prepared.base64,
-                encoding: "base64",
+                commit_sha: baseHeadSha,
               })
-              return { prepared, sha: blob.data.sha }
-            }),
-          )
 
-          const tree = await octokit.rest.git.createTree({
-            owner: repoRef.owner,
-            repo: repoRef.repo,
-            base_tree: baseCommit.data.tree.sha,
-            tree: blobs.map(({ prepared, sha }) => ({
-              path: prepared.repoPath,
-              mode: prepared.gitMode,
-              type: "blob" as const,
-              sha,
-            })),
+              await Promise.all(
+                preparedFiles.map((prepared) =>
+                  preflightRepoPath(octokit, repoRef, baseHeadSha, prepared.repoPath),
+                ),
+              )
+
+              const blobs = await Promise.all(
+                preparedFiles.map(async (prepared) => {
+                  const blob = await octokit.rest.git.createBlob({
+                    owner: repoRef.owner,
+                    repo: repoRef.repo,
+                    content: prepared.base64,
+                    encoding: "base64",
+                  })
+                  return { prepared, sha: blob.data.sha }
+                }),
+              )
+
+              const tree = await octokit.rest.git.createTree({
+                owner: repoRef.owner,
+                repo: repoRef.repo,
+                base_tree: baseCommit.data.tree.sha,
+                tree: blobs.map(({ prepared, sha }) => ({
+                  path: prepared.repoPath,
+                  mode: prepared.gitMode,
+                  type: "blob" as const,
+                  sha,
+                })),
+              })
+
+              const newCommit = await octokit.rest.git.createCommit({
+                owner: repoRef.owner,
+                repo: repoRef.repo,
+                message,
+                tree: tree.data.sha,
+                parents: [baseHeadSha],
+                author: shitRatCommitIdentity(),
+                committer: shitRatCommitIdentity(),
+              })
+
+              if (branchBase.branchExists) {
+                await octokit.rest.git.updateRef({
+                  owner: repoRef.owner,
+                  repo: repoRef.repo,
+                  ref: `heads/${targetBranch}`,
+                  sha: newCommit.data.sha,
+                  force: false,
+                })
+                return {
+                  commit: { sha: newCommit.data.sha, html_url: newCommit.data.html_url },
+                  createdBranch: false,
+                  emptyRepository: false,
+                }
+              }
+
+              try {
+                await octokit.rest.git.createRef({
+                  owner: repoRef.owner,
+                  repo: repoRef.repo,
+                  ref: `refs/heads/${targetBranch}`,
+                  sha: newCommit.data.sha,
+                })
+                return {
+                  commit: { sha: newCommit.data.sha, html_url: newCommit.data.html_url },
+                  createdBranch: true,
+                  emptyRepository: false,
+                }
+              } catch (createError) {
+                if (!isAlreadyExistsError(createError)) throw createError
+                await octokit.rest.git.updateRef({
+                  owner: repoRef.owner,
+                  repo: repoRef.repo,
+                  ref: `heads/${targetBranch}`,
+                  sha: newCommit.data.sha,
+                  force: false,
+                })
+                return {
+                  commit: { sha: newCommit.data.sha, html_url: newCommit.data.html_url },
+                  createdBranch: false,
+                  emptyRepository: false,
+                }
+              }
+            },
+            catch: (error) => (error instanceof Error ? error : new Error(String(error))),
           })
-
-          const newCommit = await octokit.rest.git.createCommit({
-            owner: repoRef.owner,
-            repo: repoRef.repo,
-            message,
-            tree: tree.data.sha,
-            parents: [branchBase.headSha],
-            author: shitRatCommitIdentity(),
-            committer: shitRatCommitIdentity(),
-          })
-
-          if (branchBase.branchExists) {
-            await octokit.rest.git.updateRef({
-              owner: repoRef.owner,
-              repo: repoRef.repo,
-              ref: `heads/${targetBranch}`,
-              sha: newCommit.data.sha,
-              force: false,
-            })
-            return { commit: newCommit.data, createdBranch: false }
-          }
-
-          try {
-            await octokit.rest.git.createRef({
-              owner: repoRef.owner,
-              repo: repoRef.repo,
-              ref: `refs/heads/${targetBranch}`,
-              sha: newCommit.data.sha,
-            })
-            return { commit: newCommit.data, createdBranch: true }
-          } catch (createError) {
-            if (!isAlreadyExistsError(createError)) throw createError
-            await octokit.rest.git.updateRef({
-              owner: repoRef.owner,
-              repo: repoRef.repo,
-              ref: `heads/${targetBranch}`,
-              sha: newCommit.data.sha,
-              force: false,
-            })
-            return { commit: newCommit.data, createdBranch: false }
-          }
-        },
-        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
-      })
 
       yield* printSuccess(
         command,
@@ -841,6 +1009,7 @@ export const commitFilesCmd = Command.make(
           repo: repoRef.fullName,
           branch: targetBranch,
           created_branch: commitResult.createdBranch,
+          empty_repository: commitResult.emptyRepository,
           files: fileReceipts,
           file_count: preparedFiles.length,
           total_size: totalBytes,

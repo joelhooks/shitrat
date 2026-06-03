@@ -37,7 +37,7 @@ If the pi extension is loaded, prefer the tools:
 - Use `--body-file` for non-trivial Markdown so shell quoting does not mangle review text.
 - Use `--dry-run` before writing unless Joel explicitly asked to commit/merge as ShitRat.
 - `merge` uses GitHub's merge endpoint to merge one branch into another as `shitratgit[bot]`, so do not fake a merge by replaying branch contents onto `main`.
-- `commit-file` is for small, intentional single-file commits. `commit-files` is for small atomic multi-file GitHub API commits. For large/complex changes, commit locally and push normally unless Joel specifically wants ShitRat API commits.
+- `commit-file` is for small, intentional single-file commits. `commit-files` is for small atomic multi-file commits. On existing branches it uses GitHub blobs/trees; on brand-new empty repos it creates one root commit through a temporary ShitRat-authenticated git push. For large/complex changes, commit locally and push normally unless Joel specifically wants ShitRat API commits.
 - Only post comments/reviews/commits when the user asked to publish or the workflow clearly requires it.
 
 ## Secrets
