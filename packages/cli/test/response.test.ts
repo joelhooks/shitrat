@@ -158,6 +158,25 @@ describe("cli json output", () => {
     expect(result.stdout).toContain("AGENTS.md")
   })
 
+  test("dry-runs git push without GitHub credentials", async () => {
+    const result = await runCli(
+      "push",
+      "joelhooks/shitrat-cli",
+      "--branch",
+      "main",
+      "--source",
+      "HEAD",
+      "--dry-run",
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe("")
+    expect(result.json.ok).toBe(true)
+    expect(result.json.result?.dry_run).toBe(true)
+    expect(typeof result.json.result?.source_sha).toBe("string")
+    expect(result.stdout).toContain("Real push mints one GitHub App installation token")
+  })
+
   test("compiles the default Codex Desktop familiar", async () => {
     const result = await runCli("compile", "--target", "codex-desktop", "--dry-run")
 

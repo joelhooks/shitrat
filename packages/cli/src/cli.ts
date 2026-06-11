@@ -25,6 +25,7 @@ import {
   commentCmd,
   installationsCmd,
   mergeCmd,
+  pushCmd,
   reviewCmd,
   statusCmd,
 } from "./commands/github.js"
@@ -50,6 +51,7 @@ const root = Command.make("shitrat", {}, () =>
                 "shitrat review <owner/repo> <pull-number> --event APPROVE|REQUEST_CHANGES|COMMENT --body-file <path>",
               merge:
                 "shitrat merge <owner/repo> --base main --head <branch> --message <message>",
+              push: "shitrat push <owner/repo> --branch main --source HEAD --cwd <local-repo>",
               commit_file:
                 "shitrat commit-file <owner/repo> --branch main --message <message> --file <local-path> [--path <repo-path>]",
               commit_files:
@@ -125,6 +127,16 @@ const root = Command.make("shitrat", {}, () =>
                 file: { required: true, description: "Repeat --file for each local file" },
               },
             },
+            {
+              command: "push <repo> --branch <branch> [--source <ref>] [--cwd <path>] [--dry-run]",
+              description: "Push local git commit(s) with ShitRat GitHub App auth",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                branch: { default: "main", description: "Target branch" },
+                source: { default: "HEAD", description: "Local git ref" },
+                cwd: { default: process.cwd(), description: "Local git worktree" },
+              },
+            },
           ],
         ),
       ),
@@ -137,6 +149,7 @@ const root = Command.make("shitrat", {}, () =>
     commentCmd,
     reviewCmd,
     mergeCmd,
+    pushCmd,
     commitFileCmd,
     commitFilesCmd,
     inboxCmd,

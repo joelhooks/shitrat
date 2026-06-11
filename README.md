@@ -51,10 +51,13 @@ packages/cli/dist/shitrat compile --target codex-desktop --dry-run
 packages/cli/dist/shitrat install codex-desktop --dry-run
 packages/cli/dist/shitrat update pi --dry-run
 packages/cli/dist/shitrat merge joelhooks/shitrat-cli --base main --head feature-branch --dry-run
+packages/cli/dist/shitrat push joelhooks/shitrat-cli --branch main --source HEAD --dry-run
 packages/cli/dist/shitrat parity
 ```
 
 Real install/update writes require `--yes`; dry-run output and receipts come first. Pi `APPEND_SYSTEM.md` updates are delimited with `<!-- shitrat:start -->` / `<!-- shitrat:end -->` and preserve local instructions outside that block.
+
+For large local commits, use `shitrat push <owner/repo> --branch <branch> --source HEAD --cwd <local-repo>`. It mints one GitHub App installation token and uses real `git push` over HTTPS, which is safer than spraying hundreds of Git Data API blob writes.
 
 ## Public Defaults and Private Overlays
 

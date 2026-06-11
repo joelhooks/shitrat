@@ -5,6 +5,7 @@ import { chmod, lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import {
+  createInstallationToken,
   createRepoOctokit,
   listInstallations,
   parseRepo,
@@ -39,6 +40,16 @@ const eventOption = Options.choice("event", ["APPROVE", "REQUEST_CHANGES", "COMM
 const branchOption = Options.text("branch").pipe(
   Options.withDescription("Target branch"),
   Options.withDefault("main"),
+)
+
+const sourceOption = Options.text("source").pipe(
+  Options.withDescription("Local git ref to push"),
+  Options.withDefault("HEAD"),
+)
+
+const cwdOption = Options.text("cwd").pipe(
+  Options.withDescription("Local git worktree to push from; defaults to cwd"),
+  Options.withDefault(process.cwd()),
 )
 
 const messageOption = Options.text("message").pipe(
@@ -410,6 +421,14 @@ const runGit = async (
   args: readonly string[],
   options: { readonly cwd: string; readonly env?: Record<string, string> },
 ): Promise<string> => {
+  const result = await runGitDetailed(args, options)
+  return result.stdout.trim()
+}
+
+const runGitDetailed = async (
+  args: readonly string[],
+  options: { readonly cwd: string; readonly env?: Record<string, string> },
+): Promise<{ readonly stdout: string; readonly stderr: string }> => {
   const proc = Bun.spawn(["git", ...args], {
     cwd: options.cwd,
     env: { ...process.env, ...options.env },
@@ -426,7 +445,17 @@ const runGit = async (
   if (exitCode !== 0) {
     throw new Error(`git ${args[0] ?? "command"} failed: ${stderr || stdout}`.trim())
   }
-  return stdout.trim()
+  return { stdout, stderr }
+}
+
+const writeGitAskpass = async (authDir: string): Promise<string> => {
+  const askpassPath = path.join(authDir, "askpass.sh")
+  await writeFile(
+    askpassPath,
+    "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' x-access-token ;;\n  *) printf '%s\\n' \"$SHITRAT_GITHUB_TOKEN\" ;;\nesac\n",
+    { mode: 0o700 },
+  )
+  return askpassPath
 }
 
 interface EmptyRepositoryCommitResult {
@@ -445,7 +474,7 @@ const commitFilesToEmptyRepository = (
     try: async () => {
       const repoDir = await mkdtemp(path.join(tmpdir(), "shitrat-empty-repo-"))
       const authDir = await mkdtemp(path.join(tmpdir(), "shitrat-git-auth-"))
-      const askpassPath = path.join(authDir, "askpass.sh")
+      let askpassPath = ""
 
       try {
         for (const prepared of preparedFiles) {
@@ -460,11 +489,7 @@ const commitFilesToEmptyRepository = (
           if (prepared.gitMode === "100755") await chmod(targetPath, mode)
         }
 
-        await writeFile(
-          askpassPath,
-          "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' x-access-token ;;\n  *) printf '%s\\n' \"$SHITRAT_GITHUB_TOKEN\" ;;\nesac\n",
-          { mode: 0o700 },
-        )
+        askpassPath = await writeGitAskpass(authDir)
 
         await runGit(["init", "-b", targetBranch], { cwd: repoDir })
         await runGit(["config", "user.name", "shitratgit[bot]"], { cwd: repoDir })
@@ -505,6 +530,90 @@ const commitFilesToEmptyRepository = (
         }
       } finally {
         await rm(repoDir, { recursive: true, force: true })
+        await rm(authDir, { recursive: true, force: true })
+      }
+    },
+    catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+  })
+
+interface GitPushPlan {
+  readonly repo: string
+  readonly gitRoot: string
+  readonly targetBranch: string
+  readonly sourceRef: string
+  readonly sourceSha: string
+  readonly currentBranch: string | undefined
+  readonly dirtyFileCount: number
+}
+
+const validateSourceRef = (value: string): string => {
+  const trimmed = value.trim()
+  if (trimmed.length === 0 || trimmed.startsWith("-")) {
+    throw new Error(`Invalid source ref '${value}'. Use HEAD, a branch, a tag, or a commit sha.`)
+  }
+  return trimmed
+}
+
+const resolveGitPushPlan = (
+  repoRef: ReturnType<typeof parseRepo>,
+  cwd: string,
+  source: string,
+  targetBranch: string,
+): Effect.Effect<GitPushPlan, Error> =>
+  Effect.tryPromise({
+    try: async () => {
+      const resolvedCwd = path.resolve(cwd)
+      const gitRoot = await runGit(["rev-parse", "--show-toplevel"], { cwd: resolvedCwd })
+      const sourceRef = validateSourceRef(source)
+      const sourceSha = await runGit(["rev-parse", "--verify", `${sourceRef}^{commit}`], {
+        cwd: gitRoot,
+      })
+      const currentBranchRaw = await runGit(["branch", "--show-current"], { cwd: gitRoot })
+      const statusRaw = await runGit(["status", "--short"], { cwd: gitRoot })
+      const dirtyFileCount = statusRaw
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0).length
+
+      return {
+        repo: repoRef.fullName,
+        gitRoot,
+        targetBranch,
+        sourceRef,
+        sourceSha,
+        currentBranch: currentBranchRaw.length > 0 ? currentBranchRaw : undefined,
+        dirtyFileCount,
+      }
+    },
+    catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+  })
+
+const pushWithGit = (
+  repoRef: ReturnType<typeof parseRepo>,
+  plan: GitPushPlan,
+  installationToken: string,
+): Effect.Effect<{ readonly stdout: string; readonly stderr: string }, Error> =>
+  Effect.tryPromise({
+    try: async () => {
+      const authDir = await mkdtemp(path.join(tmpdir(), "shitrat-git-auth-"))
+      try {
+        const askpassPath = await writeGitAskpass(authDir)
+        return await runGitDetailed(
+          [
+            "push",
+            `https://github.com/${repoRef.owner}/${repoRef.repo}.git`,
+            `${plan.sourceSha}:refs/heads/${plan.targetBranch}`,
+          ],
+          {
+            cwd: plan.gitRoot,
+            env: {
+              GIT_ASKPASS: askpassPath,
+              GIT_TERMINAL_PROMPT: "0",
+              SHITRAT_GITHUB_TOKEN: installationToken,
+            },
+          },
+        )
+      } finally {
         await rm(authDir, { recursive: true, force: true })
       }
     },
@@ -593,6 +702,16 @@ export const statusCmd = Command.make("status", { repo: repoArg }, ({ repo }) =>
             branch: { default: repository.data.default_branch ?? "main" },
             message: { description: "Git commit message", required: true },
             file: { description: "Repeat --file for each local file", required: true },
+          },
+        },
+        {
+          command: "push <repo> --branch <branch> [--source <ref>] [--cwd <path>] [--dry-run]",
+          description: "Push local git commit(s) with ShitRat GitHub App auth",
+          params: {
+            repo: { value: repoRef.fullName, required: true },
+            branch: { default: repository.data.default_branch ?? "main" },
+            source: { default: "HEAD" },
+            cwd: { default: process.cwd() },
           },
         },
       ],
@@ -1061,6 +1180,118 @@ export const commitFilesCmd = Command.make(
       ),
     ),
 ).pipe(Command.withDescription("Atomically commit multiple local files to GitHub as ShitRat"))
+
+export const pushCmd = Command.make(
+  "push",
+  {
+    repo: repoArg,
+    branch: branchOption,
+    source: sourceOption,
+    cwd: cwdOption,
+    dryRun: dryRunOption,
+  },
+  ({ repo, branch, source, cwd, dryRun }) =>
+    Effect.gen(function* () {
+      const repoRef = parseRepo(repo)
+      const targetBranch = normalizeGitRef(branch)
+      const command = `push ${repoRef.fullName}`
+      const plan = yield* resolveGitPushPlan(repoRef, cwd, source, targetBranch)
+
+      if (dryRun) {
+        yield* printSuccess(
+          command,
+          {
+            dry_run: true,
+            repo: repoRef.fullName,
+            branch: targetBranch,
+            source: plan.sourceRef,
+            source_sha: plan.sourceSha,
+            git_root: plan.gitRoot,
+            current_branch: plan.currentBranch,
+            dirty_file_count: plan.dirtyFileCount,
+            github_write: false,
+            note: "Dry run only resolves the local commit. Real push mints one GitHub App installation token and uses git push over HTTPS.",
+          },
+          [
+            {
+              command: "push <repo> --branch <branch> [--source <ref>] [--cwd <path>]",
+              description: "Push this local commit with git using ShitRat GitHub App auth",
+              params: {
+                repo: { value: repoRef.fullName, required: true },
+                branch: { value: targetBranch, default: "main" },
+                source: { value: plan.sourceRef, default: "HEAD" },
+                cwd: { value: plan.gitRoot, default: process.cwd() },
+              },
+            },
+          ],
+        )
+        return
+      }
+
+      const token = yield* createInstallationToken(repoRef.owner, repoRef.repo)
+      const pushResult = yield* pushWithGit(repoRef, plan, token.token)
+
+      yield* printSuccess(
+        command,
+        {
+          repo: repoRef.fullName,
+          branch: targetBranch,
+          source: plan.sourceRef,
+          source_sha: plan.sourceSha,
+          git_root: plan.gitRoot,
+          current_branch: plan.currentBranch,
+          dirty_file_count: plan.dirtyFileCount,
+          commit: {
+            sha: plan.sourceSha,
+            html_url: `https://github.com/${repoRef.fullName}/commit/${plan.sourceSha}`,
+          },
+          actor: "shitratgit[bot]",
+          installation_id: token.installationId,
+          token_expires_at: token.expiresAt,
+          push_stdout: pushResult.stdout.trim(),
+          push_stderr: pushResult.stderr.trim(),
+        },
+        [
+          {
+            command: "status <repo>",
+            description: "Verify ShitRat still has access to this repository",
+            params: { repo: { value: repoRef.fullName, required: true } },
+          },
+          {
+            command: "push <repo> --branch <branch> [--source <ref>] [--cwd <path>] [--dry-run]",
+            description: "Push another local commit with git using ShitRat GitHub App auth",
+            params: {
+              repo: { value: repoRef.fullName, required: true },
+              branch: { value: targetBranch, default: "main" },
+              source: { default: "HEAD" },
+              cwd: { value: plan.gitRoot },
+            },
+          },
+        ],
+      )
+    }).pipe(
+      Effect.catchAll((error) =>
+        printFailure(
+          `push ${repo}`,
+          error,
+          "PUSH_FAILED",
+          "Verify Contents: write permission, installation access, target branch protections, and that --cwd is a git worktree. Use --dry-run first if unsure.",
+          [
+            {
+              command: "push <repo> --branch <branch> [--source <ref>] [--cwd <path>] [--dry-run]",
+              description: "Preview or retry a real git push as ShitRat",
+              params: {
+                repo: { value: repo, required: true },
+                branch: { default: "main" },
+                source: { default: "HEAD" },
+                cwd: { default: process.cwd() },
+              },
+            },
+          ],
+        ),
+      ),
+    ),
+).pipe(Command.withDescription("Push local git commit(s) with ShitRat GitHub App auth"))
 
 export const mergeCmd = Command.make(
   "merge",
