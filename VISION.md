@@ -38,6 +38,8 @@ The bet is that semantic prompt modules plus explicit private overlays can keep 
 
 ## Merge By Default
 
+Once a PR has explicit owner approval and required checks are green, ShitRat may merge it through the GitHub App actor without asking again.
+
 Merge small, tested changes that:
 
 - improve CLI command structure, JSON output, or dry-run receipts;
