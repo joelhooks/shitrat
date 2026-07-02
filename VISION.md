@@ -2,69 +2,71 @@
 
 ## Intent
 
-ShitRat is the agent-first GitHub App and harness context system for Joel's coding-agent work.
+ShitRat is the deployable agent familiar for Joel's coding-agent harnesses.
 
-It exists to give Codex Desktop, Pi, Claude, Slack, and future agent harnesses a consistent operating profile, a safe GitHub-visible actor, and dry-run-first tooling. It is not just a prompt blob and it is not a way for agents to act as Joel.
+It exists to make agent behavior portable across Codex Desktop, Pi, Claude, Slack, and future runtimes without hiding important rules in one-off prompts. The repo should provide a small semantic context system: public defaults, private overlays, typed prompt modules, harness adapters, and dry-run-first install tooling.
 
 ## Who It Serves
 
-- Operators who need agent-authored GitHub work to use a distinct bot identity.
-- Coding agents that need typed commands, JSON envelopes, next actions, and short-lived credentials.
-- Harness adapters that need shared defaults plus local/private overlays.
-- Repos that need source-grounded comments, reviews, commits, and PRs without using a human token.
+- Operators who want one familiar agent profile across local and hosted harnesses.
+- Coding agents that need consistent source-control, GitHub, Brain, and safety rules.
+- Maintainers who need ShitRat-authored GitHub actions to be auditable and distinct from Joel-authored work.
+- Future users who should be able to install public defaults without receiving Joel's private topology, secrets, or personal context.
 
-## Product Bet
+## Current Product Bet
 
-The useful shape is a semantic context system plus a narrow GitHub App CLI.
+ShitRat should be a real context runtime, not a copied prompt blob.
 
-Public defaults should be safe to share. Private overlays should stay private. Real writes should be explicit, attributable, and easy to dry-run first. Every command should return machine-readable output that another agent can use without scraping prose.
+The bet is that semantic prompt modules plus explicit private overlays can keep agent behavior consistent while preserving a hard public/private boundary. Dry-run-first tooling should make install, compile, parity, and GitHub App actions inspectable before they mutate anything.
 
 ## Priorities
 
-1. Keep GitHub-visible work authored by `shitratgit[bot]`, not Joel.
-2. Keep the CLI JSON-only with stable envelopes, errors, and `next_actions`.
-3. Prefer dry-run commands before comments, reviews, commits, PRs, installs, and merges.
-4. Separate public defaults from private overlays, secrets, host wiring, and paid/private corpora.
-5. Keep harness adapters boring: Codex Desktop, Pi, Claude, and Slack should compile from the same semantic source.
-6. Preserve source-grounded reviews, receipt trails, and exact follow-up commands.
-7. Keep vendored Effect and Pi trees as read-only references unless the task is explicitly about updating them.
+1. **Semantic context over prompt paste.** Keep identity, tool policy, Brain policy, receipts, and private overlays as validated prompt primitives.
+2. **Harness parity.** Codex Desktop, Pi, Claude, and Slack adapters should share the same underlying contracts where possible.
+3. **Public-safe defaults.** The committed repo must not leak private machine names, hostnames, personal details, secrets, raw Slack data, or private operational receipts.
+4. **Dry-run-first operations.** Install, compile, GitHub App actions, and maintenance commands should produce receipts before writes.
+5. **ShitRat-authored GitHub work.** Agent-authored commits, comments, reviews, PRs, and merges should go through the GitHub App actor where available.
+6. **Small, typed CLI surfaces.** Commands should return structured output that another agent can consume without scraping prose.
 
 ## Non-Goals
 
-- Do not impersonate Joel or use Joel's personal GitHub token for agent-authored work.
-- Do not store private keys, installation tokens, private overlays, secrets, host topology, or personal context in public defaults.
-- Do not make real install writes the default path.
-- Do not make broad harness promises before the adapter contract is proven.
-- Do not edit vendored reference trees as part of normal CLI work.
+- Do not turn ShitRat into a personal private-memory dump.
+- Do not make raw local prompts the source of truth when semantic modules can own the contract.
+- Do not make install commands silently mutate user environments without dry-run receipts.
+- Do not use Joel-authenticated GitHub writes for agent-authored public work when the ShitRat actor is available.
+- Do not couple public defaults to one local machine, tailnet, account, or private repo layout.
 
 ## Merge By Default
 
+Once a PR has explicit owner approval and required checks are green, ShitRat may merge it through the GitHub App actor without asking again.
+
 Merge small, tested changes that:
 
-- improve CLI envelopes, parser errors, repo validation, or `next_actions`;
-- improve ShitRat GitHub App status, comment, review, commit, PR, or merge dry-runs;
-- clarify public defaults, semantic context modules, or harness adapter boundaries;
-- improve installer planning without enabling unsafe writes;
-- add focused tests for command output, repo parsing, and dry-run behavior.
+- improve CLI command structure, JSON output, or dry-run receipts;
+- clarify public/private memory boundaries;
+- add or harden harness adapters without weakening parity;
+- make GitHub App actions safer, more explicit, or easier to audit;
+- improve semantic prompt validation and compilation;
+- keep private overlays out of committed source.
 
 ## Needs Owner Sign-Off
 
 Stop for explicit approval before:
 
-- enabling real install writes by default;
-- changing credential storage, app permissions, or token handling;
-- publishing private overlays or private operator context;
-- adding broad new harness behavior that changes installed prompts;
-- merging PRs, tagging releases, or publishing binaries from automation;
-- changing the default familiar identity in public artifacts.
+- changing ShitRat's public identity, name, or default persona;
+- broadening GitHub App permissions or write behavior;
+- adding new private-overlay fields that could leak sensitive local context;
+- enabling real install writes where dry-run-only behavior is currently expected;
+- changing how agent-authored GitHub work is attributed;
+- publishing private operator facts, hostnames, account names, or secrets.
 
 ## Evidence Of Progress
 
 ShitRat is getting better when:
 
-- `bun run check`, `bun run test`, and `bun run build` pass for the CLI;
-- `shitrat status <repo>` gives clear access and permission state;
-- dry-run commands show exactly what would be written before any write;
-- PRs and comments are attributable to `shitratgit[bot]`;
-- public defaults compile across target harnesses without leaking private context;
-- the next agent can read a JSON envelope and know the next safe command.
+- `doctor`, `compile`, `install --dry-run`, and parity checks produce useful receipts;
+- GitHub App commands clearly report actor, repo, permission, dry-run, and next-action state;
+- public defaults can be reviewed without private leakage;
+- private overlays can customize behavior without forked prompts;
+- Codex Desktop, Pi, Claude, and Slack behavior stay recognizably consistent;
+- automation PRs can be labeled and reviewed without falling back to Joel-authenticated writes.
