@@ -9,7 +9,8 @@
     "test": "turbo run test",
     "build": "turbo run build",
     "doctor": "turbo run doctor",
-    "format": "turbo run format"
+    "format": "turbo run format",
+    "brain:check": "pi-notes brain check"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",
