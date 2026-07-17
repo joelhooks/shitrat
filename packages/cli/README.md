@@ -81,6 +81,18 @@ bun run src/cli.ts push joelhooks/shitrat-cli --repo-dir . --dry-run
 
 # Push existing local commits (all outgoing authors must be shitratgit[bot])
 bun run src/cli.ts push joelhooks/shitrat-cli --repo-dir .
+
+# Preview opening a pull request as shitratgit[bot]
+bun run src/cli.ts create-pr joelhooks/shitrat-cli --title "docs: propose vision" --head shitrat/propose-vision --base main --body-file pr.md --dry-run
+
+# Open a pull request as shitratgit[bot]
+bun run src/cli.ts create-pr joelhooks/shitrat-cli --title "docs: propose vision" --head shitrat/propose-vision --base main --body-file pr.md
+
+# Preview merging a pull request as shitratgit[bot]
+bun run src/cli.ts merge-pr joelhooks/shitrat-cli 123 --method squash --dry-run
+
+# Merge a pull request as shitratgit[bot] when project policy allows
+bun run src/cli.ts merge-pr joelhooks/shitrat-cli 123 --method squash
 ```
 
 ## Commit doctrine

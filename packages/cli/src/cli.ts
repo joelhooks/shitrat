@@ -23,8 +23,10 @@ import {
   commitFileCmd,
   commitFilesCmd,
   commentCmd,
+  createPrCmd,
   installationsCmd,
   mergeCmd,
+  mergePrCmd,
   pushCmd,
   reviewCmd,
   statusCmd,
@@ -56,6 +58,10 @@ const root = Command.make("shitrat", {}, () =>
                 "shitrat commit-file <owner/repo> --branch main --message <message> --file <local-path> [--path <repo-path>]",
               commit_files:
                 "shitrat commit-files <owner/repo> --branch main --message <message> --file <path> [--file <path>...]",
+              create_pr:
+                "shitrat create-pr <owner/repo> --title <title> --head <branch> --base main --body-file <path>",
+              merge_pr:
+                "shitrat merge-pr <owner/repo> <pull-number> --method squash --dry-run",
               install:
                 "shitrat install pi|claude|codex-desktop --dry-run",
               update:
@@ -136,6 +142,26 @@ const root = Command.make("shitrat", {}, () =>
                 "repo-dir": { default: process.cwd(), description: "Local git worktree" },
               },
             },
+            {
+              command: "create-pr <repo> --title <title> --head <branch> --base <branch> --body-file <path> [--dry-run]",
+              description: "Open a pull request as ShitRat",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                title: { required: true, description: "Pull request title" },
+                head: { required: true, description: "Head branch" },
+                base: { default: "main", description: "Base branch" },
+                path: { description: "Markdown body file" },
+              },
+            },
+            {
+              command: "merge-pr <repo> <number> --method squash [--dry-run]",
+              description: "Merge a pull request as ShitRat when policy allows",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                number: { required: true, description: "PR number" },
+                method: { enum: ["merge", "squash", "rebase"], default: "squash" },
+              },
+            },
           ],
         ),
       ),
@@ -149,6 +175,8 @@ const root = Command.make("shitrat", {}, () =>
     reviewCmd,
     mergeCmd,
     pushCmd,
+    createPrCmd,
+    mergePrCmd,
     commitFileCmd,
     commitFilesCmd,
     inboxCmd,
