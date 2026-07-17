@@ -2,8 +2,64 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { gitModeFromFileMode } from "../src/commands/github.js"
+import {
+  buildAuthenticatedGitInvocation,
+  buildFetchCommandArgs,
+  buildPushCommandArgs,
+  inspectPushRepository,
+  resolvePushPlan,
+  SHITRAT_GIT_AUTHOR,
+  ShitRatPushError,
+} from "../src/git-push.js"
 import { parseRepo } from "../src/github-app.js"
 import { failure, success } from "../src/response.js"
+
+const runGit = async (cwd: string, ...args: string[]): Promise<string> => {
+  const proc = Bun.spawn(["git", ...args], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ])
+  if (exitCode !== 0) throw new Error(stderr || stdout)
+  return stdout.trim()
+}
+
+const commitFile = async (
+  cwd: string,
+  message: string,
+  author: { readonly name: string; readonly email: string },
+): Promise<string> => {
+  const file = join(cwd, "history.txt")
+  const previous = await Bun.file(file).text().catch(() => "")
+  await writeFile(file, `${previous}${message}\n`, "utf8")
+  await runGit(cwd, "add", "history.txt")
+  await runGit(
+    cwd,
+    "-c",
+    `user.name=${author.name}`,
+    "-c",
+    `user.email=${author.email}`,
+    "commit",
+    "-m",
+    message,
+  )
+  return runGit(cwd, "rev-parse", "HEAD")
+}
+
+const createPushRepo = async (): Promise<{ readonly dir: string; readonly baseSha: string }> => {
+  const dir = await mkdtemp(join(tmpdir(), "shitrat-push-test-"))
+  await runGit(dir, "init", "-b", "main")
+  await runGit(dir, "remote", "add", "origin", "https://github.com/joelhooks/shitrat-cli.git")
+  const baseSha = await commitFile(dir, "base", SHITRAT_GIT_AUTHOR)
+  await runGit(dir, "update-ref", "refs/remotes/origin/main", baseSha)
+  return { dir, baseSha }
+}
 
 const runCli = async (...args: string[]) => {
   const proc = Bun.spawn(["bun", "run", "src/cli.ts", ...args], {
@@ -53,6 +109,228 @@ describe("github repo parsing", () => {
 
   test("rejects loose names", () => {
     expect(() => parseRepo("migrate-egghead")).toThrow("Invalid repo")
+  })
+})
+
+describe("local git push", () => {
+  test("preserves executable file mode for API commits", () => {
+    expect(gitModeFromFileMode(0o100755)).toBe("100755")
+    expect(gitModeFromFileMode(0o100644)).toBe("100644")
+  })
+
+  test("accepts bot-authored outgoing commits", async () => {
+    const { dir } = await createPushRepo()
+    try {
+      const outgoingSha = await commitFile(dir, "bot change", SHITRAT_GIT_AUTHOR)
+      const repository = await inspectPushRepository({
+        repo: "joelhooks/shitrat-cli",
+        repoDir: dir,
+      })
+      const plan = await resolvePushPlan(repository, false)
+
+      expect(plan.commits.map((commit) => commit.sha)).toEqual([outgoingSha])
+      expect(plan.nothingToPush).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("rejects mixed outgoing authors with AUTHOR_NOT_BOT", async () => {
+    const { dir } = await createPushRepo()
+    try {
+      await commitFile(dir, "bot change", SHITRAT_GIT_AUTHOR)
+      await commitFile(dir, "human change", {
+        name: "Example Human",
+        email: "human@example.com",
+      })
+      const repository = await inspectPushRepository({
+        repo: "joelhooks/shitrat-cli",
+        repoDir: dir,
+      })
+
+      try {
+        await resolvePushPlan(repository, false)
+        throw new Error("expected authorship gate to fail")
+      } catch (error) {
+        expect(error).toBeInstanceOf(ShitRatPushError)
+        expect((error as ShitRatPushError).code).toBe("AUTHOR_NOT_BOT")
+        expect((error as ShitRatPushError).fix).toContain("git -c user.name='shitratgit[bot]'")
+        expect((error as ShitRatPushError).fix).toContain("--allow-any-author")
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("allows mixed outgoing authors when explicitly requested", async () => {
+    const { dir } = await createPushRepo()
+    try {
+      await commitFile(dir, "human change", {
+        name: "Example Human",
+        email: "human@example.com",
+      })
+      const repository = await inspectPushRepository({
+        repo: "joelhooks/shitrat-cli",
+        repoDir: dir,
+      })
+      const plan = await resolvePushPlan(repository, true)
+
+      expect(plan.commits).toHaveLength(1)
+      expect(plan.commits[0]?.authorName).toBe("Example Human")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("counts creation of a new branch even when its commit already exists on origin", async () => {
+    const { dir, baseSha } = await createPushRepo()
+    try {
+      await runGit(dir, "branch", "release", baseSha)
+      const repository = await inspectPushRepository({
+        repo: "joelhooks/shitrat-cli",
+        repoDir: dir,
+        branch: "release",
+      })
+      const plan = await resolvePushPlan(repository, false)
+
+      expect(plan.commits).toHaveLength(0)
+      expect(plan.nothingToPush).toBe(false)
+      expect(plan.pushedCount).toBe(1)
+      expect(plan.range).toBe(`0000000000000000000000000000000000000000..${baseSha}`)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("refuses checkout-local URL rewrites", async () => {
+    const { dir } = await createPushRepo()
+    try {
+      await runGit(
+        dir,
+        "config",
+        "--local",
+        "url.ext::credential-catcher.insteadOf",
+        "https://github.com/",
+      )
+      try {
+        await inspectPushRepository({ repo: "joelhooks/shitrat-cli", repoDir: dir })
+        throw new Error("expected unsafe git config to fail")
+      } catch (error) {
+        expect(error).toBeInstanceOf(ShitRatPushError)
+        expect((error as ShitRatPushError).code).toBe("UNSAFE_GIT_CONFIG")
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("refuses worktree-scoped URL rewrites", async () => {
+    const { dir } = await createPushRepo()
+    try {
+      await runGit(dir, "config", "--local", "extensions.worktreeConfig", "true")
+      await runGit(
+        dir,
+        "config",
+        "--worktree",
+        "url.ext::credential-catcher.insteadOf",
+        "https://github.com/",
+      )
+      try {
+        await inspectPushRepository({ repo: "joelhooks/shitrat-cli", repoDir: dir })
+        throw new Error("expected unsafe worktree git config to fail")
+      } catch (error) {
+        expect(error).toBeInstanceOf(ShitRatPushError)
+        expect((error as ShitRatPushError).code).toBe("UNSAFE_GIT_CONFIG")
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("refuses a checkout whose origin does not match the requested repo", async () => {
+    const { dir } = await createPushRepo()
+    try {
+      try {
+        await inspectPushRepository({ repo: "joelhooks/not-this-repo", repoDir: dir })
+        throw new Error("expected repo mismatch to fail")
+      } catch (error) {
+        expect(error).toBeInstanceOf(ShitRatPushError)
+        expect((error as ShitRatPushError).code).toBe("REPO_MISMATCH")
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("returns a nothing-to-push success envelope", async () => {
+    const { dir, baseSha } = await createPushRepo()
+    try {
+      const repository = await inspectPushRepository({
+        repo: "joelhooks/shitrat-cli",
+        repoDir: dir,
+      })
+      const plan = await resolvePushPlan(repository, false)
+      const envelope = success("push joelhooks/shitrat-cli", {
+        repo: repository.repo,
+        branch: repository.branch,
+        pushed: plan.commits.length,
+        range: plan.range,
+        actor: SHITRAT_GIT_AUTHOR.name,
+      })
+
+      expect(plan.nothingToPush).toBe(true)
+      expect(envelope.ok).toBe(true)
+      expect(envelope.result).toEqual({
+        repo: "joelhooks/shitrat-cli",
+        branch: "main",
+        pushed: 0,
+        range: `${baseSha}..${baseSha}`,
+        actor: "shitratgit[bot]",
+      })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("keeps installation tokens out of git argv", () => {
+    const fakeToken = "ghs_DO_NOT_PUT_THIS_IN_ARGV"
+    const invocation = buildAuthenticatedGitInvocation(
+      ["push", "https://github.com/joelhooks/shitrat-cli.git", "HEAD:refs/heads/main"],
+      fakeToken,
+    )
+    const argv = JSON.stringify(invocation.args)
+
+    expect(argv).not.toContain(fakeToken)
+    expect(argv).toContain("$SHITRAT_PUSH_TOKEN")
+    expect(argv).toContain("$protocol")
+    expect(argv).toContain("$host")
+    expect(invocation.args).toContain("core.hooksPath=/dev/null")
+    expect(invocation.args).toContain("protocol.allow=never")
+    expect(invocation.args).toContain("protocol.https.allow=always")
+    expect(invocation.env.SHITRAT_PUSH_TOKEN).toBe(fakeToken)
+    expect(invocation.env.GIT_CONFIG_GLOBAL).toBe("/dev/null")
+    expect(invocation.env.GIT_CONFIG_NOSYSTEM).toBe("1")
+
+    const pushArgs = buildPushCommandArgs(
+      {
+        repo: "joelhooks/shitrat-cli",
+        gitRoot: "/tmp/unused",
+        branch: "main",
+        localSha: "0123456789012345678901234567890123456789",
+      },
+      false,
+    )
+    expect(pushArgs).toContain("--no-verify")
+    expect(pushArgs).toContain("--recurse-submodules=no")
+    expect(pushArgs).not.toContain("--force")
+    expect(
+      buildFetchCommandArgs({
+        repo: "joelhooks/shitrat-cli",
+        gitRoot: "/tmp/unused",
+        branch: "main",
+        localSha: "0123456789012345678901234567890123456789",
+      }),
+    ).toContain("--no-recurse-submodules")
   })
 })
 
@@ -156,25 +434,6 @@ describe("cli json output", () => {
     expect(result.json.result?.file_count).toBe(2)
     expect(result.stdout).toContain("README.md")
     expect(result.stdout).toContain("AGENTS.md")
-  })
-
-  test("dry-runs git push without GitHub credentials", async () => {
-    const result = await runCli(
-      "push",
-      "joelhooks/shitrat-cli",
-      "--branch",
-      "main",
-      "--source",
-      "HEAD",
-      "--dry-run",
-    )
-
-    expect(result.exitCode).toBe(0)
-    expect(result.stderr).toBe("")
-    expect(result.json.ok).toBe(true)
-    expect(result.json.result?.dry_run).toBe(true)
-    expect(typeof result.json.result?.source_sha).toBe("string")
-    expect(result.stdout).toContain("Real push mints one GitHub App installation token")
   })
 
   test("compiles the default Codex Desktop familiar", async () => {

@@ -51,13 +51,15 @@ packages/cli/dist/shitrat compile --target codex-desktop --dry-run
 packages/cli/dist/shitrat install codex-desktop --dry-run
 packages/cli/dist/shitrat update pi --dry-run
 packages/cli/dist/shitrat merge joelhooks/shitrat-cli --base main --head feature-branch --dry-run
-packages/cli/dist/shitrat push joelhooks/shitrat-cli --branch main --source HEAD --dry-run
+packages/cli/dist/shitrat push joelhooks/shitrat-cli --repo-dir . --dry-run
 packages/cli/dist/shitrat parity
 ```
 
 Real install/update writes require `--yes`; dry-run output and receipts come first. Pi `APPEND_SYSTEM.md` updates are delimited with `<!-- shitrat:start -->` / `<!-- shitrat:end -->` and preserve local instructions outside that block.
 
-For large local commits, use `shitrat push <owner/repo> --branch <branch> --source HEAD --cwd <local-repo>`. It mints one GitHub App installation token and uses real `git push` over HTTPS, which is safer than spraying hundreds of Git Data API blob writes.
+When a checkout exists, commit locally as `shitratgit[bot]` so commit hooks run, then use `shitrat push <owner/repo> [--branch <name>] [--repo-dir <local-repo>]`. The command fetches first, rejects non-bot outgoing authors by default, and injects a short-lived GitHub App token only into the child `git` process environment. It disables `pre-push` hooks so they cannot inherit that token. It never rewrites history or force-pushes.
+
+Use `commit-file` or `commit-files` only for clone-less edits. Those commands create commits through the GitHub API with web-flow signing; they do not run local hooks.
 
 ## Public Defaults and Private Overlays
 
