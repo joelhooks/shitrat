@@ -71,15 +71,6 @@ const titleOption = Options.text("title").pipe(
   Options.withDescription("Pull request title"),
 )
 
-const headOption = Options.text("head").pipe(
-  Options.withDescription("Pull request head branch"),
-)
-
-const baseOption = Options.text("base").pipe(
-  Options.withDescription("Pull request base branch"),
-  Options.withDefault("main"),
-)
-
 const draftOption = Options.boolean("draft").pipe(
   Options.withDescription("Open the pull request as a draft"),
 )
