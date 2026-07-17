@@ -158,6 +158,7 @@ describe("cli json output", () => {
     expect(result.stdout).toContain("AGENTS.md")
   })
 
+<<<<<<< Updated upstream
   test("dry-runs git push without GitHub credentials", async () => {
     const result = await runCli(
       "push",
@@ -175,6 +176,46 @@ describe("cli json output", () => {
     expect(result.json.result?.dry_run).toBe(true)
     expect(typeof result.json.result?.source_sha).toBe("string")
     expect(result.stdout).toContain("Real push mints one GitHub App installation token")
+||||||| Stash base
+=======
+  test("dry-runs create-pr without GitHub credentials", async () => {
+    const result = await runCli(
+      "create-pr",
+      "joelhooks/shitrat-cli",
+      "--title",
+      "docs: propose vision",
+      "--head",
+      "shitrat/propose-vision",
+      "--base",
+      "main",
+      "--body",
+      "Tiny PR body.",
+      "--dry-run",
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe("")
+    expect(result.json.ok).toBe(true)
+    expect(result.json.result?.dry_run).toBe(true)
+    expect(result.stdout).toContain("shitrat/propose-vision")
+  })
+
+  test("dry-runs merge-pr without GitHub credentials", async () => {
+    const result = await runCli(
+      "merge-pr",
+      "joelhooks/shitrat-cli",
+      "123",
+      "--method",
+      "squash",
+      "--dry-run",
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe("")
+    expect(result.json.ok).toBe(true)
+    expect(result.json.result?.dry_run).toBe(true)
+    expect(result.stdout).toContain("github_write")
+>>>>>>> Stashed changes
   })
 
   test("compiles the default Codex Desktop familiar", async () => {

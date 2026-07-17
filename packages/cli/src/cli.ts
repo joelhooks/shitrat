@@ -23,9 +23,15 @@ import {
   commitFileCmd,
   commitFilesCmd,
   commentCmd,
+  createPrCmd,
   installationsCmd,
+<<<<<<< Updated upstream
   mergeCmd,
   pushCmd,
+||||||| Stash base
+=======
+  mergePrCmd,
+>>>>>>> Stashed changes
   reviewCmd,
   statusCmd,
 } from "./commands/github.js"
@@ -56,10 +62,18 @@ const root = Command.make("shitrat", {}, () =>
                 "shitrat commit-file <owner/repo> --branch main --message <message> --file <local-path> [--path <repo-path>]",
               commit_files:
                 "shitrat commit-files <owner/repo> --branch main --message <message> --file <path> [--file <path>...]",
+<<<<<<< Updated upstream
               install:
                 "shitrat install pi|claude|codex-desktop --dry-run",
               update:
                 "shitrat update pi|claude|codex-desktop --dry-run",
+||||||| Stash base
+=======
+              create_pr:
+                "shitrat create-pr <owner/repo> --title <title> --head <branch> --base main --body-file <path>",
+              merge_pr:
+                "shitrat merge-pr <owner/repo> <pull-number> --method squash --dry-run",
+>>>>>>> Stashed changes
             },
             secrets: [
               "shitrat_github_app_id",
@@ -128,6 +142,7 @@ const root = Command.make("shitrat", {}, () =>
               },
             },
             {
+<<<<<<< Updated upstream
               command: "push <repo> --branch <branch> [--source <ref>] [--cwd <path>] [--dry-run]",
               description: "Push local git commit(s) with ShitRat GitHub App auth",
               params: {
@@ -135,6 +150,26 @@ const root = Command.make("shitrat", {}, () =>
                 branch: { default: "main", description: "Target branch" },
                 source: { default: "HEAD", description: "Local git ref" },
                 cwd: { default: process.cwd(), description: "Local git worktree" },
+||||||| Stash base
+=======
+              command: "create-pr <repo> --title <title> --head <branch> --base <branch> --body-file <path> [--dry-run]",
+              description: "Open a pull request as ShitRat",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                title: { required: true, description: "Pull request title" },
+                head: { required: true, description: "Head branch" },
+                base: { default: "main", description: "Base branch" },
+                path: { description: "Markdown body file" },
+              },
+            },
+            {
+              command: "merge-pr <repo> <number> --method squash [--dry-run]",
+              description: "Merge a pull request as ShitRat when policy allows",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                number: { required: true, description: "PR number" },
+                method: { enum: ["merge", "squash", "rebase"], default: "squash" },
+>>>>>>> Stashed changes
               },
             },
           ],
@@ -148,8 +183,14 @@ const root = Command.make("shitrat", {}, () =>
     statusCmd,
     commentCmd,
     reviewCmd,
+<<<<<<< Updated upstream
     mergeCmd,
     pushCmd,
+||||||| Stash base
+=======
+    createPrCmd,
+    mergePrCmd,
+>>>>>>> Stashed changes
     commitFileCmd,
     commitFilesCmd,
     inboxCmd,

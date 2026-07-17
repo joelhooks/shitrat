@@ -75,6 +75,18 @@ bun run src/cli.ts commit-file joelhooks/shitrat-cli --branch main --message "do
 
 # Atomically commit multiple files as shitratgit[bot]
 bun run src/cli.ts commit-files joelhooks/shitrat-cli --branch main --message "docs: update ShitRat docs" --file README.md --file docs/shitrat-commit-flow.md
+
+# Preview opening a pull request as shitratgit[bot]
+bun run src/cli.ts create-pr joelhooks/shitrat-cli --title "docs: propose vision" --head shitrat/propose-vision --base main --body-file pr.md --dry-run
+
+# Open a pull request as shitratgit[bot]
+bun run src/cli.ts create-pr joelhooks/shitrat-cli --title "docs: propose vision" --head shitrat/propose-vision --base main --body-file pr.md
+
+# Preview merging a pull request as shitratgit[bot]
+bun run src/cli.ts merge-pr joelhooks/shitrat-cli 123 --method squash --dry-run
+
+# Merge a pull request as shitratgit[bot] when project policy allows
+bun run src/cli.ts merge-pr joelhooks/shitrat-cli 123 --method squash
 ```
 
 Review events:
