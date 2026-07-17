@@ -75,7 +75,19 @@ bun run src/cli.ts commit-file joelhooks/shitrat-cli --branch main --message "do
 
 # Atomically commit multiple files as shitratgit[bot]
 bun run src/cli.ts commit-files joelhooks/shitrat-cli --branch main --message "docs: update ShitRat docs" --file README.md --file docs/shitrat-commit-flow.md
+
+# Preview a push of the checked-out branch using GitHub App credentials
+bun run src/cli.ts push joelhooks/shitrat-cli --repo-dir . --dry-run
+
+# Push existing local commits (all outgoing authors must be shitratgit[bot])
+bun run src/cli.ts push joelhooks/shitrat-cli --repo-dir .
 ```
+
+## Commit doctrine
+
+When a checkout exists, commit locally as `shitratgit[bot]`, let the repository's commit hooks run, and publish the unchanged commits with `shitrat push`. `push` fetches first, checks the checkout's `origin`, rejects non-bot outgoing authors unless `--allow-any-author` is explicit, and never amends, rebases, or force-pushes. It passes `--no-verify` and disables submodule recursion for authenticated Git commands so checkout-controlled hooks or nested repositories cannot inherit the short-lived installation token.
+
+Use `commit-file` and `commit-files` for clone-less edits. They commit through the GitHub API with web-flow signing, so they cannot run local hooks. They remain useful for small remote-only changes, not normal worktree development.
 
 Review events:
 

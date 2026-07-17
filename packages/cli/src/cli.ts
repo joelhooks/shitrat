@@ -51,7 +51,7 @@ const root = Command.make("shitrat", {}, () =>
                 "shitrat review <owner/repo> <pull-number> --event APPROVE|REQUEST_CHANGES|COMMENT --body-file <path>",
               merge:
                 "shitrat merge <owner/repo> --base main --head <branch> --message <message>",
-              push: "shitrat push <owner/repo> --branch main --source HEAD --cwd <local-repo>",
+              push: "shitrat push <owner/repo> [--branch <name>] [--repo-dir <local-repo>]",
               commit_file:
                 "shitrat commit-file <owner/repo> --branch main --message <message> --file <local-path> [--path <repo-path>]",
               commit_files:
@@ -128,13 +128,12 @@ const root = Command.make("shitrat", {}, () =>
               },
             },
             {
-              command: "push <repo> --branch <branch> [--source <ref>] [--cwd <path>] [--dry-run]",
-              description: "Push local git commit(s) with ShitRat GitHub App auth",
+              command: "push <repo> [--branch <name>] [--repo-dir <path>] [--allow-any-author] [--dry-run]",
+              description: "Push existing local commits with ShitRat GitHub App auth",
               params: {
                 repo: { required: true, description: "Repository in owner/repo form" },
-                branch: { default: "main", description: "Target branch" },
-                source: { default: "HEAD", description: "Local git ref" },
-                cwd: { default: process.cwd(), description: "Local git worktree" },
+                branch: { description: "Defaults to the checked-out branch" },
+                "repo-dir": { default: process.cwd(), description: "Local git worktree" },
               },
             },
           ],

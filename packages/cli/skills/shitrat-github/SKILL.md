@@ -16,6 +16,7 @@ shitrat status skillrecordings/migrate-egghead
 shitrat comment skillrecordings/migrate-egghead 26 --body-file comment.md
 shitrat review skillrecordings/egghead-next 1608 --event REQUEST_CHANGES --body-file review.md
 shitrat merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch"
+shitrat push joelhooks/shitrat-cli --repo-dir /path/to/checkout
 shitrat commit-file joelhooks/shitrat-cli --branch main --message "docs: update notes" --file README.md
 shitrat commit-files joelhooks/shitrat-cli --branch main --message "docs: update docs" --file README.md --file docs/shitrat-commit-flow.md
 ```
@@ -37,7 +38,8 @@ If the pi extension is loaded, prefer the tools:
 - Use `--body-file` for non-trivial Markdown so shell quoting does not mangle review text.
 - Use `--dry-run` before writing unless Joel explicitly asked to commit/merge as ShitRat.
 - `merge` uses GitHub's merge endpoint to merge one branch into another as `shitratgit[bot]`, so do not fake a merge by replaying branch contents onto `main`.
-- `commit-file` is for small, intentional single-file commits. `commit-files` is for small atomic multi-file commits. On existing branches it uses GitHub blobs/trees; on brand-new empty repos it creates one root commit through a temporary ShitRat-authenticated git push. For large/complex changes, commit locally and push normally unless Joel specifically wants ShitRat API commits.
+- When a checkout exists, commit locally as `shitratgit[bot]` so commit hooks run, then publish the unchanged commits with `shitrat push`. It rejects non-bot outgoing authors unless `--allow-any-author` is explicit, disables `pre-push` hooks so they cannot inherit the installation token, and never rewrites history or force-pushes.
+- `commit-file` is for small, intentional clone-less edits. `commit-files` is for small atomic clone-less batches. On existing branches they use GitHub blobs/trees with web-flow signing; on brand-new empty repos they create one root commit through a temporary ShitRat-authenticated git push. They cannot run local hooks.
 - Only post comments/reviews/commits when the user asked to publish or the workflow clearly requires it.
 
 ## Secrets
