@@ -67,6 +67,38 @@ const messageOption = Options.text("message").pipe(
   Options.withDescription("Git commit message"),
 )
 
+const titleOption = Options.text("title").pipe(
+  Options.withDescription("Pull request title"),
+)
+
+const headOption = Options.text("head").pipe(
+  Options.withDescription("Pull request head branch"),
+)
+
+const baseOption = Options.text("base").pipe(
+  Options.withDescription("Pull request base branch"),
+  Options.withDefault("main"),
+)
+
+const draftOption = Options.boolean("draft").pipe(
+  Options.withDescription("Open the pull request as a draft"),
+)
+
+const mergeMethodOption = Options.choice("method", ["merge", "squash", "rebase"] as const).pipe(
+  Options.withDescription("Pull request merge method"),
+  Options.withDefault("squash" as const),
+)
+
+const commitTitleOption = Options.text("commit-title").pipe(
+  Options.withDescription("Optional merge commit title"),
+  Options.optional,
+)
+
+const commitMessageOption = Options.text("commit-message").pipe(
+  Options.withDescription("Optional merge commit message"),
+  Options.optional,
+)
+
 const fileOption = Options.text("file").pipe(
   Options.withDescription("Local file to commit"),
 )
@@ -132,6 +164,22 @@ const readBody = (
       if (inline) return inline
       if (file) return await Bun.file(file).text()
       throw new Error(`Missing body. Use ${command} --body '<markdown>' or --body-file review.md`)
+    },
+    catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+  })
+
+const readOptionalBody = (
+  body: Option.Option<string>,
+  bodyFile: Option.Option<string>,
+): Effect.Effect<string | undefined, Error> =>
+  Effect.tryPromise({
+    try: async () => {
+      const inline = optionToUndefined(body)
+      const file = optionToUndefined(bodyFile)
+      if (inline && file) throw new Error("Use either --body or --body-file, not both.")
+      if (inline) return inline
+      if (file) return await Bun.file(file).text()
+      return undefined
     },
     catch: (error) => (error instanceof Error ? error : new Error(String(error))),
   })
@@ -706,6 +754,234 @@ export const commentCmd = Command.make(
       ),
     ),
 ).pipe(Command.withDescription("Post an issue or PR conversation comment as ShitRat"))
+
+export const createPrCmd = Command.make(
+  "create-pr",
+  {
+    repo: repoArg,
+    title: titleOption,
+    head: headOption,
+    base: baseOption,
+    body: bodyOption,
+    bodyFile: bodyFileOption,
+    draft: draftOption,
+    dryRun: dryRunOption,
+  },
+  ({ repo, title, head, base, body, bodyFile, draft, dryRun }) =>
+    Effect.gen(function* () {
+      const repoRef = parseRepo(repo)
+      const baseBranch = normalizeGitRef(base)
+      const headBranch = normalizeGitRef(head)
+      const bodyText = yield* readOptionalBody(body, bodyFile)
+      const command = `create-pr ${repoRef.fullName}`
+
+      if (dryRun) {
+        yield* printSuccess(
+          command,
+          {
+            dry_run: true,
+            repo: repoRef.fullName,
+            title,
+            head: headBranch,
+            base: baseBranch,
+            draft,
+            body_present: Boolean(bodyText),
+            github_write: false,
+          },
+          [
+            {
+              command: "create-pr <repo> --title <title> --head <branch> --base <branch> --body-file <path>",
+              description: "Open this pull request as ShitRat after review",
+              params: {
+                repo: { value: repoRef.fullName, required: true },
+                title: { value: title, required: true },
+                head: { value: headBranch, required: true },
+                base: { value: baseBranch, default: "main" },
+                path: { description: "Markdown body file" },
+              },
+            },
+          ],
+        )
+        return
+      }
+
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const pull = yield* Effect.tryPromise({
+        try: () =>
+          octokit.rest.pulls.create({
+            owner: repoRef.owner,
+            repo: repoRef.repo,
+            title,
+            head: headBranch,
+            base: baseBranch,
+            ...(bodyText ? { body: bodyText } : {}),
+            draft,
+            maintainer_can_modify: true,
+          }),
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      })
+
+      yield* printSuccess(
+        command,
+        {
+          repo: repoRef.fullName,
+          number: pull.data.number,
+          url: pull.data.html_url,
+          state: pull.data.state,
+          draft: pull.data.draft,
+          title: pull.data.title,
+          head: pull.data.head.ref,
+          base: pull.data.base.ref,
+          author: pull.data.user?.login,
+          actor: "shitratgit[bot]",
+          installation_id: token.installationId,
+        },
+        [
+          {
+            command: "comment <repo> <number> --body-file <path>",
+            description: "Add a follow-up PR comment as ShitRat",
+            params: {
+              repo: { value: repoRef.fullName, required: true },
+              number: { value: pull.data.number, required: true },
+              path: { required: true, description: "Markdown body file" },
+            },
+          },
+          {
+            command: "merge-pr <repo> <number> --method squash --dry-run",
+            description: "Preview merging this pull request as ShitRat",
+            params: {
+              repo: { value: repoRef.fullName, required: true },
+              number: { value: pull.data.number, required: true },
+              method: { enum: ["merge", "squash", "rebase"], default: "squash" },
+            },
+          },
+        ],
+      )
+    }).pipe(
+      Effect.catchAll((error) =>
+        printFailure(
+          `create-pr ${repo}`,
+          error,
+          "CREATE_PR_FAILED",
+          "Verify Pull requests: write permission, installation access, branch names, and that the head branch has commits not in base. Use --dry-run first if unsure.",
+          [
+            {
+              command: "create-pr <repo> --title <title> --head <branch> --base <branch> --body-file <path> [--dry-run]",
+              description: "Preview or retry opening a pull request as ShitRat",
+              params: {
+                repo: { value: repo, required: true },
+                title: { required: true },
+                head: { required: true },
+                base: { default: "main" },
+                path: { description: "Markdown body file" },
+              },
+            },
+          ],
+        ),
+      ),
+    ),
+).pipe(Command.withDescription("Open a pull request as ShitRat"))
+
+export const mergePrCmd = Command.make(
+  "merge-pr",
+  {
+    repo: repoArg,
+    number: issueNumberArg,
+    method: mergeMethodOption,
+    commitTitle: commitTitleOption,
+    commitMessage: commitMessageOption,
+    dryRun: dryRunOption,
+  },
+  ({ repo, number, method, commitTitle, commitMessage, dryRun }) =>
+    Effect.gen(function* () {
+      const repoRef = parseRepo(repo)
+      const command = `merge-pr ${repoRef.fullName} ${number}`
+      const resolvedCommitTitle = optionToUndefined(commitTitle)
+      const resolvedCommitMessage = optionToUndefined(commitMessage)
+
+      if (dryRun) {
+        yield* printSuccess(
+          command,
+          {
+            dry_run: true,
+            repo: repoRef.fullName,
+            number,
+            method,
+            commit_title: resolvedCommitTitle,
+            commit_message_present: Boolean(resolvedCommitMessage),
+            github_write: false,
+          },
+          [
+            {
+              command: "merge-pr <repo> <number> --method <method>",
+              description: "Merge this pull request as ShitRat after policy approval",
+              params: {
+                repo: { value: repoRef.fullName, required: true },
+                number: { value: number, required: true },
+                method: { value: method, enum: ["merge", "squash", "rebase"], default: "squash" },
+              },
+            },
+          ],
+        )
+        return
+      }
+
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const merged = yield* Effect.tryPromise({
+        try: () =>
+          octokit.rest.pulls.merge({
+            owner: repoRef.owner,
+            repo: repoRef.repo,
+            pull_number: number,
+            merge_method: method,
+            ...(resolvedCommitTitle ? { commit_title: resolvedCommitTitle } : {}),
+            ...(resolvedCommitMessage ? { commit_message: resolvedCommitMessage } : {}),
+          }),
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      })
+
+      yield* printSuccess(
+        command,
+        {
+          repo: repoRef.fullName,
+          number,
+          merged: merged.data.merged,
+          message: merged.data.message,
+          sha: merged.data.sha,
+          method,
+          actor: "shitratgit[bot]",
+          installation_id: token.installationId,
+        },
+        [
+          {
+            command: "status <repo>",
+            description: "Verify ShitRat still has access to this repository",
+            params: { repo: { value: repoRef.fullName, required: true } },
+          },
+        ],
+      )
+    }).pipe(
+      Effect.catchAll((error) =>
+        printFailure(
+          `merge-pr ${repo} ${number}`,
+          error,
+          "MERGE_PR_FAILED",
+          "Verify Pull requests: write permission, branch protection, review requirements, mergeability, and project policy approval. Use --dry-run first if unsure.",
+          [
+            {
+              command: "merge-pr <repo> <number> --method squash --dry-run",
+              description: "Preview or retry merging a pull request as ShitRat",
+              params: {
+                repo: { value: repo, required: true },
+                number: { value: number, required: true },
+                method: { enum: ["merge", "squash", "rebase"], default: "squash" },
+              },
+            },
+          ],
+        ),
+      ),
+    ),
+).pipe(Command.withDescription("Merge a pull request as ShitRat"))
 
 export const commitFileCmd = Command.make(
   "commit-file",
