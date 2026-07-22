@@ -6,4 +6,4 @@ corepack install
 pnpm install
 
 # setup repositories
-git clone https://github.com/effect-ts/effect-smol.git .repos/effect-v4
+git clone --branch main https://github.com/effect-ts/effect.git .repos/effect-v4
