@@ -10,6 +10,7 @@ tags:
   - shitbox
   - triage
   - brain
+disable-model-invocation: true
 ---
 
 # Shitbox Triage
