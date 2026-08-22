@@ -30,11 +30,12 @@ bun run build
 bun run src/cli.ts status skillrecordings/migrate-egghead
 bun run src/cli.ts commit-file joelhooks/shitrat-cli --branch main --message "docs: update README" --file README.md --dry-run
 bun run src/cli.ts commit-files joelhooks/shitrat-cli --branch main --message "docs: update docs" --file README.md --file docs/shitrat-commit-flow.md --dry-run
+bun run src/cli.ts x article draft --title "The past blocked the future" --html-file ./post.html --dry-run
 ```
 
 ## Test scope
 
-Use `bun run test`, not broad `bun test`. The package script scopes tests to `./test/response.test.ts`; raw `bun test` wanders into vendored `/pi` source tests and fails on their Vitest API assumptions, which is noisy reference-tree bullshit rather than a ShitRat failure.
+Use `bun run test`, not broad `bun test`. The package script scopes tests to `./test/response.test.ts` and `./test/x-article.test.ts`; raw `bun test` wanders into vendored `/pi` source tests and fails on their Vitest API assumptions, which is noisy reference-tree bullshit rather than a ShitRat failure.
 
 ## Vendored source trees
 

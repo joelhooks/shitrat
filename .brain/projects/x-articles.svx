@@ -1,0 +1,37 @@
+---
+title: "X Articles CLI"
+type: "project"
+status: "active"
+created_at: "2026-08-21"
+tags:
+  - shitrat
+  - x
+  - articles
+---
+
+# X Articles CLI
+
+`shitrat x` is the durable command surface for X Articles.
+
+It converts HTML or markdown to DraftJS `content_state`, dry-runs the payload, then optionally creates or publishes a draft. Live writes require `--yes`. JSON envelopes only. Tokens stay in the secret store.
+
+## Why it exists
+
+A session that posted a ShitRat log post as an X Article burned the 10/24h user create cap on failed probes. OAuth 1.0a 403'd article create. OAuth 2.0 user context worked. Large bodies 503'd. Failed creates still counted. There is no official draft update endpoint.
+
+That knowledge belongs in a CLI, not `/tmp`.
+
+## Commands
+
+- `shitrat x me`
+- `shitrat x article convert --title --html-file|--md-file`
+- `shitrat x article draft --title --html-file|--md-file [--cover] --dry-run|--yes`
+- `shitrat x article publish <article-id> --dry-run|--yes`
+
+## Validation
+
+`bun test ./test/x-article.test.ts` covers HTML/markdown conversion, the 24h cap header parser, secret-name namespacing, and dry-run CLI output with `x_write: false`.
+
+## Unresolved
+
+Live create against X is still gated by the 24h cap from the first capture session. Cover upload and publish paths are implemented but not live-verified in that same session after the cap hit zero.

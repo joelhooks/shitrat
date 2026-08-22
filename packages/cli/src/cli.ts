@@ -42,6 +42,7 @@ import {
   statusCmd,
 } from "./commands/github.js"
 import { inboxCmd } from "./commands/inbox.js"
+import { xCmd } from "./commands/x.js"
 import { errorMessage, failure, json, success } from "./response.js"
 
 const root = Command.make("shitrat", {}, () =>
@@ -87,6 +88,7 @@ const root = Command.make("shitrat", {}, () =>
                 "shitrat install pi|claude|codex-desktop --dry-run",
               update:
                 "shitrat update pi|claude|codex-desktop --dry-run",
+              x: "shitrat x article draft --title <title> --html-file <path> --dry-run",
             },
             secrets: [
               "shitrat_github_app_id",
@@ -260,6 +262,10 @@ const root = Command.make("shitrat", {}, () =>
                 sha: { required: true, description: "Commit sha, branch or tag" },
               },
             },
+            {
+              command: "x article draft --title <title> --html-file <path> --dry-run",
+              description: "Convert HTML into an X Article draft payload without contacting X",
+            },
           ],
         ),
       ),
@@ -288,6 +294,7 @@ const root = Command.make("shitrat", {}, () =>
     commitFileCmd,
     commitFilesCmd,
     inboxCmd,
+    xCmd,
   ]),
 )
 
