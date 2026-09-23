@@ -1,6 +1,6 @@
 ---
 name: shitrat-github
-description: Post GitHub issue comments, PR reviews, and small file commits as the ShitRat GitHub App (`shitratgit[bot]`) instead of Joel. Use when reviewing PRs, commenting on issues, doing smoke tests, committing repo files through the GitHub API, or any workflow where GitHub authorship should be ShitRat.
+description: Post GitHub issue comments, inline PR review replies, PR reviews, edit pull requests, and small file commits as the ShitRat GitHub App (`shitratgit[bot]`) instead of Joel. Use when reviewing PRs, replying to review threads, updating PR metadata, commenting on issues, doing smoke tests, committing repo files through the GitHub API, or any workflow where GitHub authorship should be ShitRat.
 ---
 
 # ShitRat GitHub
@@ -15,6 +15,8 @@ Prefer ShitRat for published agent-authored GitHub comments/reviews:
 shitrat status skillrecordings/migrate-egghead
 shitrat comment skillrecordings/migrate-egghead 26 --body-file comment.md
 shitrat review skillrecordings/egghead-next 1608 --event REQUEST_CHANGES --body-file review.md
+shitrat reply skillrecordings/egghead-next 1608 123456 --body-file reply.md
+shitrat edit-pr skillrecordings/egghead-next 1608 --title "fix: clearer title" --body-file pr.md --base main --state open
 shitrat merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch"
 shitrat push joelhooks/shitrat-cli --repo-dir /path/to/checkout
 shitrat commit-file joelhooks/shitrat-cli --branch main --message "docs: update notes" --file README.md
@@ -26,6 +28,8 @@ If the pi extension is loaded, prefer the tools:
 - `shitrat_status`
 - `shitrat_comment`
 - `shitrat_review`
+- `shitrat_reply`
+- `shitrat_edit_pr`
 - `shitrat_merge`
 - `shitrat_commit_file`
 - `shitrat_commit_files`
@@ -34,6 +38,8 @@ If the pi extension is loaded, prefer the tools:
 
 - Do not paste or print the private key.
 - Do not use Joel's `gh pr review` when the desired actor is ShitRat.
+- Use `shitrat reply` / `shitrat_reply` for inline review threads; `comment` posts to the PR conversation, not an inline thread.
+- Use `shitrat edit-pr` / `shitrat_edit_pr` to update a PR's title, body, base, or open/closed state instead of `gh pr edit`.
 - Use `shitrat status <owner/repo>` first when repo access is uncertain.
 - Use `--body-file` for non-trivial Markdown so shell quoting does not mangle review text.
 - Use `--dry-run` before writing unless Joel explicitly asked to commit/merge as ShitRat.

@@ -23,7 +23,9 @@ import {
   commitFileCmd,
   commitFilesCmd,
   commentCmd,
+  replyCmd,
   createPrCmd,
+  editPrCmd,
   installationsCmd,
   mergeCmd,
   mergePrCmd,
@@ -32,6 +34,7 @@ import {
   statusCmd,
 } from "./commands/github.js"
 import { inboxCmd } from "./commands/inbox.js"
+import { xCmd } from "./commands/x.js"
 import { errorMessage, failure, json, success } from "./response.js"
 
 const root = Command.make("shitrat", {}, () =>
@@ -49,6 +52,8 @@ const root = Command.make("shitrat", {}, () =>
               installations: "shitrat installations",
               status: "shitrat status <owner/repo>",
               comment: "shitrat comment <owner/repo> <issue-or-pr-number> --body-file <path>",
+              reply: "shitrat reply <owner/repo> <pull-number> <comment-id> --body-file <path>",
+              edit_pr: "shitrat edit-pr <owner/repo> <pull-number> [--title <title>] [--body-file <path>] [--base <branch>] [--state open|closed]",
               review:
                 "shitrat review <owner/repo> <pull-number> --event APPROVE|REQUEST_CHANGES|COMMENT --body-file <path>",
               merge:
@@ -66,6 +71,7 @@ const root = Command.make("shitrat", {}, () =>
                 "shitrat install pi|claude|codex-desktop --dry-run",
               update:
                 "shitrat update pi|claude|codex-desktop --dry-run",
+              x: "shitrat x article draft --title <title> --html-file <path> --dry-run",
             },
             secrets: [
               "shitrat_github_app_id",
@@ -96,6 +102,16 @@ const root = Command.make("shitrat", {}, () =>
               params: {
                 repo: { required: true, description: "Repository in owner/repo form" },
                 number: { required: true, description: "Issue or PR number" },
+                path: { required: true, description: "Markdown body file" },
+              },
+            },
+            {
+              command: "reply <repo> <number> <comment-id> --body-file <path>",
+              description: "Reply to a pull request review comment as ShitRat",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                number: { required: true, description: "PR number" },
+                "comment-id": { required: true, description: "Review comment id" },
                 path: { required: true, description: "Markdown body file" },
               },
             },
@@ -162,6 +178,10 @@ const root = Command.make("shitrat", {}, () =>
                 method: { enum: ["merge", "squash", "rebase"], default: "squash" },
               },
             },
+            {
+              command: "x article draft --title <title> --html-file <path> --dry-run",
+              description: "Convert HTML into an X Article draft payload without contacting X",
+            },
           ],
         ),
       ),
@@ -172,14 +192,17 @@ const root = Command.make("shitrat", {}, () =>
     installationsCmd,
     statusCmd,
     commentCmd,
+    replyCmd,
     reviewCmd,
     mergeCmd,
     pushCmd,
     createPrCmd,
     mergePrCmd,
+    editPrCmd,
     commitFileCmd,
     commitFilesCmd,
     inboxCmd,
+    xCmd,
   ]),
 )
 

@@ -11,7 +11,7 @@
   "scripts": {
     "dev": "bun run src/cli.ts",
     "check": "tsgo --noEmit --pretty false",
-    "test": "bun test ./test/response.test.ts",
+    "test": "bun test ./test/response.test.ts ./test/x-article.test.ts ./test/github-pr-edits.test.ts",
     "build": "tsgo -p tsconfig.build.json && bun build src/cli.ts --target bun --outdir dist && chmod +x dist/cli.js",
     "build:binary": "bun build src/cli.ts --compile --outfile dist/shitrat",
     "doctor": "bun run src/cli.ts doctor --dry-run",

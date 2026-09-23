@@ -153,6 +153,18 @@ const summarizeShitRatResult = (value: unknown): string => {
       .join("\n")
   }
 
+  if (command.startsWith("shitrat reply")) {
+    return ["✅ ShitRat replied to PR review comment", repo, url, author ? `Author: ${author}` : undefined]
+      .filter(Boolean)
+      .join("\n")
+  }
+
+  if (command.startsWith("shitrat edit-pr")) {
+    return [dryRun ? "🧪 Dry run: PR edit ready" : "✅ ShitRat edited pull request", repo, url]
+      .filter(Boolean)
+      .join("\n")
+  }
+
   if (command.startsWith("shitrat status")) {
     const permissions = isRecord(result.permissions)
       ? Object.entries(result.permissions)
@@ -358,6 +370,67 @@ export default function shitratExtension(pi: ExtensionAPI) {
 
       const result = await runShitRat(pi, args, signal)
       return toolResult(result)
+    },
+  })
+
+  pi.registerTool({
+    name: "shitrat_reply",
+    label: "ShitRat Reply",
+    description: "Reply to an inline pull request review comment as shitratgit[bot].",
+    promptSnippet: "Reply to GitHub inline review comments as shitratgit[bot] via the ShitRat GitHub App",
+    promptGuidelines: [
+      "Use shitrat_reply instead of gh api .../replies when Joel wants ShitRat to reply to an inline review thread.",
+      "Only post a reply when the user asked to publish or the workflow clearly requires it.",
+    ],
+    parameters: Type.Object({
+      repo: Type.String({ description: "Repository in owner/repo form" }),
+      number: Type.Number({ description: "Pull request number" }),
+      commentId: Type.Number({ description: "Inline review comment id" }),
+      body: Type.String({ description: "Markdown reply body" }),
+    }),
+    async execute(_toolCallId, params, signal) {
+      const result = await withBodyFile(params.body, (bodyFile) =>
+        runShitRat(pi, ["reply", params.repo, String(params.number), String(params.commentId), "--body-file", bodyFile], signal),
+      )
+      return toolResult(result)
+    },
+  })
+
+  pi.registerTool({
+    name: "shitrat_edit_pr",
+    label: "ShitRat Edit PR",
+    description: "Update a pull request title, body, base branch, or open/closed state as shitratgit[bot].",
+    promptSnippet: "Edit GitHub pull request metadata as shitratgit[bot] via the ShitRat GitHub App",
+    promptGuidelines: [
+      "Use shitrat_edit_pr instead of gh pr edit when Joel wants ShitRat, not Joel, to be the GitHub actor.",
+      "Use dryRun: true first unless the user explicitly asked to write the change.",
+      "At least one of title, body, base, or state must be provided.",
+    ],
+    parameters: Type.Object({
+      repo: Type.String({ description: "Repository in owner/repo form" }),
+      number: Type.Number({ description: "Pull request number" }),
+      title: Type.Optional(Type.String({ description: "Updated pull request title" })),
+      body: Type.Optional(Type.String({ description: "Updated Markdown body" })),
+      base: Type.Optional(Type.String({ description: "Updated base branch" })),
+      state: Type.Optional(StringEnum(["open", "closed"] as const)),
+      dryRun: Type.Optional(Type.Boolean({ description: "Preview without writing to GitHub" })),
+    }),
+    async execute(_toolCallId, params, signal) {
+      const args = ["edit-pr", params.repo, String(params.number)]
+      if (params.title !== undefined) args.push("--title", params.title)
+      if (params.body !== undefined) {
+        return withBodyFile(params.body, async (bodyFile) => {
+          const bodyArgs = [...args, "--body-file", bodyFile]
+          if (params.base !== undefined) bodyArgs.push("--base", params.base)
+          if (params.state !== undefined) bodyArgs.push("--state", params.state)
+          if (params.dryRun) bodyArgs.push("--dry-run")
+          return toolResult(await runShitRat(pi, bodyArgs, signal))
+        })
+      }
+      if (params.base !== undefined) args.push("--base", params.base)
+      if (params.state !== undefined) args.push("--state", params.state)
+      if (params.dryRun) args.push("--dry-run")
+      return toolResult(await runShitRat(pi, args, signal))
     },
   })
 

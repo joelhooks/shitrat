@@ -57,6 +57,12 @@ bun run src/cli.ts comment skillrecordings/migrate-egghead 26 --body-file commen
 # Create PR review as shitratgit[bot]
 bun run src/cli.ts review skillrecordings/egghead-next 1608 --event REQUEST_CHANGES --body-file review.md
 
+# Reply to an inline PR review comment thread as shitratgit[bot]
+bun run src/cli.ts reply skillrecordings/egghead-next 1608 123456 --body-file reply.md
+
+# Edit a pull request's title, body, base branch, or state as shitratgit[bot]
+bun run src/cli.ts edit-pr skillrecordings/egghead-next 1608 --title "fix: clearer title" --body-file pr.md --base main --state open
+
 # Preview a branch merge as shitratgit[bot]
 bun run src/cli.ts merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch" --dry-run
 
@@ -93,6 +99,9 @@ bun run src/cli.ts merge-pr joelhooks/shitrat-cli 123 --method squash --dry-run
 
 # Merge a pull request as shitratgit[bot] when project policy allows
 bun run src/cli.ts merge-pr joelhooks/shitrat-cli 123 --method squash
+
+# Inspect an X Article payload without contacting X
+bun run src/cli.ts x article draft --title "The past blocked the future" --html-file ./post.html --dry-run
 ```
 
 ## Commit doctrine
@@ -125,8 +134,9 @@ More detail: [`docs/hunk-diff-viewer.md`](docs/hunk-diff-viewer.md)
 
 This repo includes:
 
-- `extensions/shitrat`: pi extension that registers `shitrat_status`, `shitrat_comment`, `shitrat_review`, `shitrat_merge`, `shitrat_commit_file`, and `shitrat_commit_files` tools.
+- `extensions/shitrat`: pi extension that registers `shitrat_status`, `shitrat_comment`, `shitrat_reply`, `shitrat_edit_pr`, `shitrat_review`, `shitrat_merge`, `shitrat_commit_file`, and `shitrat_commit_files` tools.
 - `skills/shitrat-github`: skill instructions for using ShitRat as the GitHub actor.
+- `skills/shitrat-x`: X Articles draft and publish through `shitrat x`.
 
 Install locally:
 
