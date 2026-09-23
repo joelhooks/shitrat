@@ -29,6 +29,10 @@ const issueNumberArg = Args.integer({ name: "number" }).pipe(
   Args.withDescription("Issue or pull request number"),
 )
 
+const commentIdArg = Args.integer({ name: "comment-id" }).pipe(
+  Args.withDescription("Review comment id to reply to"),
+)
+
 const bodyOption = Options.text("body").pipe(
   Options.withDescription("Markdown body text"),
   Options.optional,
@@ -69,6 +73,21 @@ const messageOption = Options.text("message").pipe(
 
 const titleOption = Options.text("title").pipe(
   Options.withDescription("Pull request title"),
+)
+
+const optionalTitleOption = Options.text("title").pipe(
+  Options.withDescription("Updated pull request title"),
+  Options.optional,
+)
+
+const optionalBaseOption = Options.text("base").pipe(
+  Options.withDescription("Updated base branch"),
+  Options.optional,
+)
+
+const pullStateOption = Options.choice("state", ["open", "closed"] as const).pipe(
+  Options.withDescription("Updated pull request state"),
+  Options.optional,
 )
 
 const draftOption = Options.boolean("draft").pipe(
@@ -643,6 +662,21 @@ export const statusCmd = Command.make("status", { repo: repoArg }, ({ repo }) =>
           },
         },
         {
+          command: "reply <repo> <number> <comment-id> --body-file <path>",
+          description: "Reply to an inline pull request review comment as ShitRat",
+          params: {
+            repo: { value: repoRef.fullName, required: true },
+            number: { description: "PR number", required: true },
+            "comment-id": { description: "Review comment id", required: true },
+            path: { description: "Markdown body file", required: true },
+          },
+        },
+        {
+          command: "edit-pr <repo> <number> [--title <title>] [--body-file <path>] [--base <branch>] [--state open|closed]",
+          description: "Edit pull request metadata as ShitRat",
+          params: { repo: { value: repoRef.fullName, required: true }, number: { description: "PR number", required: true } },
+        },
+        {
           command: "review <repo> <number> --event <event> --body-file <path>",
           description: "Create a pull request review as ShitRat",
           params: {
@@ -696,6 +730,24 @@ export const statusCmd = Command.make("status", { repo: repoArg }, ({ repo }) =>
   ),
 ).pipe(Command.withDescription("Verify ShitRat GitHub App access to a repo"))
 
+export const createReviewCommentReply = (
+  octokit: Pick<GitHubOctokit["rest"]["pulls"], "createReplyForReviewComment">,
+  input: { owner: string; repo: string; pull_number: number; comment_id: number; body: string },
+) => octokit.createReplyForReviewComment(input)
+
+export const updatePullRequest = (
+  octokit: Pick<GitHubOctokit["rest"]["pulls"], "update">,
+  input: {
+    owner: string
+    repo: string
+    pull_number: number
+    title?: string
+    body?: string
+    base?: string
+    state?: "open" | "closed"
+  },
+) => octokit.update(input)
+
 export const commentCmd = Command.make(
   "comment",
   { repo: repoArg, number: issueNumberArg, body: bodyOption, bodyFile: bodyFileOption },
@@ -745,6 +797,47 @@ export const commentCmd = Command.make(
       ),
     ),
 ).pipe(Command.withDescription("Post an issue or PR conversation comment as ShitRat"))
+
+export const replyCmd = Command.make(
+  "reply",
+  { repo: repoArg, number: issueNumberArg, commentId: commentIdArg, body: bodyOption, bodyFile: bodyFileOption, dryRun: dryRunOption },
+  ({ repo, number, commentId, body, bodyFile, dryRun }) =>
+    Effect.gen(function* () {
+      const repoRef = parseRepo(repo)
+      const command = `reply ${repoRef.fullName} ${number} ${commentId}`
+      const bodyText = yield* readBody(command, body, bodyFile)
+      if (dryRun) {
+        yield* printSuccess(command, {
+          dry_run: true,
+          repo: repoRef.fullName,
+          number,
+          comment_id: commentId,
+          body: bodyText,
+          github_write: false,
+        })
+        return
+      }
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const response = yield* Effect.tryPromise(() => createReviewCommentReply(octokit.rest.pulls, {
+        owner: repoRef.owner,
+        repo: repoRef.repo,
+        pull_number: number,
+        comment_id: commentId,
+        body: bodyText,
+      }))
+      yield* printSuccess(command, {
+        repo: repoRef.fullName,
+        number,
+        comment_id: response.data.id,
+        url: response.data.html_url,
+        author: response.data.user?.login,
+        installation_id: token.installationId,
+      })
+    }).pipe(Effect.catchAll((error) =>
+      printFailure(`reply ${repo} ${number} ${commentId}`, error, "REPLY_FAILED",
+        "Verify Pull requests: write permission and that the review comment belongs to this pull request."),
+    )),
+).pipe(Command.withDescription("Reply to a pull request review comment as ShitRat"))
 
 export const createPrCmd = Command.make(
   "create-pr",
@@ -973,6 +1066,63 @@ export const mergePrCmd = Command.make(
       ),
     ),
 ).pipe(Command.withDescription("Merge a pull request as ShitRat"))
+
+export const editPrCmd = Command.make(
+  "edit-pr",
+  {
+    repo: repoArg,
+    number: issueNumberArg,
+    title: optionalTitleOption,
+    body: bodyOption,
+    bodyFile: bodyFileOption,
+    base: optionalBaseOption,
+    state: pullStateOption,
+    dryRun: dryRunOption,
+  },
+  ({ repo, number, title, body, bodyFile, base, state, dryRun }) =>
+    Effect.gen(function* () {
+      const repoRef = parseRepo(repo)
+      const resolvedTitle = optionToUndefined(title)
+      const resolvedBase = optionToUndefined(base)
+      const resolvedState = optionToUndefined(state)
+      const bodyText = yield* readOptionalBody(body, bodyFile)
+      if (resolvedTitle === undefined && bodyText === undefined && resolvedBase === undefined && resolvedState === undefined) {
+        throw new Error("Provide at least one of --title, --body/--body-file, --base, or --state.")
+      }
+      const command = `edit-pr ${repoRef.fullName} ${number}`
+      const fields = {
+        ...(resolvedTitle !== undefined ? { title: resolvedTitle } : {}),
+        ...(bodyText !== undefined ? { body: bodyText } : {}),
+        ...(resolvedBase !== undefined ? { base: normalizeGitRef(resolvedBase) } : {}),
+        ...(resolvedState !== undefined ? { state: resolvedState } : {}),
+      }
+      if (dryRun) {
+        yield* printSuccess(command, { dry_run: true, repo: repoRef.fullName, number, changed: fields, github_write: false })
+        return
+      }
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const response = yield* Effect.tryPromise(() => updatePullRequest(octokit.rest.pulls, {
+        owner: repoRef.owner,
+        repo: repoRef.repo,
+        pull_number: number,
+        ...fields,
+      }))
+      yield* printSuccess(command, {
+        repo: repoRef.fullName,
+        number,
+        changed: fields,
+        title: response.data.title,
+        body: response.data.body,
+        base: response.data.base.ref,
+        state: response.data.state,
+        url: response.data.html_url,
+        installation_id: token.installationId,
+      })
+    }).pipe(Effect.catchAll((error) =>
+      printFailure(`edit-pr ${repo} ${number}`, error, "EDIT_PR_FAILED",
+        "Verify Pull requests: write permission, that the pull request exists, and that at least one supported field is provided."),
+    )),
+).pipe(Command.withDescription("Edit a pull request's title, body, base, or state as ShitRat"))
 
 export const commitFileCmd = Command.make(
   "commit-file",
