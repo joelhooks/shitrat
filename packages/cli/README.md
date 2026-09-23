@@ -99,9 +99,6 @@ bun run src/cli.ts merge-pr joelhooks/shitrat-cli 123 --method squash --dry-run
 
 # Merge a pull request as shitratgit[bot] when project policy allows
 bun run src/cli.ts merge-pr joelhooks/shitrat-cli 123 --method squash
-
-# Inspect an X Article payload without contacting X
-bun run src/cli.ts x article draft --title "The past blocked the future" --html-file ./post.html --dry-run
 ```
 
 ## Commit doctrine
@@ -136,7 +133,6 @@ This repo includes:
 
 - `extensions/shitrat`: pi extension that registers `shitrat_status`, `shitrat_comment`, `shitrat_reply`, `shitrat_edit_pr`, `shitrat_review`, `shitrat_merge`, `shitrat_commit_file`, and `shitrat_commit_files` tools.
 - `skills/shitrat-github`: skill instructions for using ShitRat as the GitHub actor.
-- `skills/shitrat-x`: X Articles draft and publish through `shitrat x`.
 
 Install locally:
 
