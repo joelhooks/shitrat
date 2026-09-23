@@ -34,7 +34,6 @@ import {
   statusCmd,
 } from "./commands/github.js"
 import { inboxCmd } from "./commands/inbox.js"
-import { xCmd } from "./commands/x.js"
 import { errorMessage, failure, json, success } from "./response.js"
 
 const root = Command.make("shitrat", {}, () =>
@@ -71,7 +70,6 @@ const root = Command.make("shitrat", {}, () =>
                 "shitrat install pi|claude|codex-desktop --dry-run",
               update:
                 "shitrat update pi|claude|codex-desktop --dry-run",
-              x: "shitrat x article draft --title <title> --html-file <path> --dry-run",
             },
             secrets: [
               "shitrat_github_app_id",
@@ -114,6 +112,11 @@ const root = Command.make("shitrat", {}, () =>
                 "comment-id": { required: true, description: "Review comment id" },
                 path: { required: true, description: "Markdown body file" },
               },
+            },
+            {
+              command: "edit-pr <repo> <number> [--title <title>] [--body-file <path>] [--base <branch>] [--state open|closed]",
+              description: "Edit pull request metadata as ShitRat",
+              params: { repo: { required: true, description: "Repository in owner/repo form" }, number: { required: true, description: "PR number" } },
             },
             {
               command: "review <repo> <number> --event <event> --body-file <path>",
@@ -178,10 +181,6 @@ const root = Command.make("shitrat", {}, () =>
                 method: { enum: ["merge", "squash", "rebase"], default: "squash" },
               },
             },
-            {
-              command: "x article draft --title <title> --html-file <path> --dry-run",
-              description: "Convert HTML into an X Article draft payload without contacting X",
-            },
           ],
         ),
       ),
@@ -202,7 +201,6 @@ const root = Command.make("shitrat", {}, () =>
     commitFileCmd,
     commitFilesCmd,
     inboxCmd,
-    xCmd,
   ]),
 )
 
