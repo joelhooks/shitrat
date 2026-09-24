@@ -78,7 +78,7 @@ const runCli = async (...args: string[]) => {
     stdout,
     stderr,
     exitCode,
-    json: JSON.parse(stdout) as { ok: boolean; result?: Record<string, unknown> },
+    json: JSON.parse(stdout) as { ok: boolean; result?: Record<string, unknown>; error?: { code: string } },
   }
 }
 
@@ -456,6 +456,14 @@ describe("cli json output", () => {
     expect(result.json.ok).toBe(true)
     expect(result.json.result?.dry_run).toBe(true)
     expect(result.stdout).toContain("shitrat/propose-vision")
+  })
+
+  test("requires a reason when skipping the merge gate", async () => {
+    const result = await runCli("merge-pr", "joelhooks/shitrat-cli", "123", "--skip-gate")
+
+    expect(result.exitCode).toBe(0)
+    expect(result.json.ok).toBe(false)
+    expect(result.json.error?.code).toBe("USAGE_ERROR")
   })
 
   test("dry-runs merge-pr without GitHub credentials", async () => {

@@ -97,8 +97,10 @@ bun run src/cli.ts create-pr joelhooks/shitrat-cli --title "docs: propose vision
 # Preview merging a pull request as shitratgit[bot]
 bun run src/cli.ts merge-pr joelhooks/shitrat-cli 123 --method squash --dry-run
 
-# Merge a pull request as shitratgit[bot] when project policy allows
+# Merge a pull request as shitratgit[bot] after the pre-merge gate passes
 bun run src/cli.ts merge-pr joelhooks/shitrat-cli 123 --method squash
+
+`merge-pr` refuses PRs behind the base, without green checks on the current head, or reported unmergeable by GitHub. To refresh a branch, run `shitrat update-branch <owner/repo> <number>` and wait for CI to finish before retrying. The only bypass is `--skip-gate --reason "<why>"`; dry runs execute the gate when GitHub credentials are available.
 ```
 
 ## Commit doctrine

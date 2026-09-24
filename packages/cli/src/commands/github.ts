@@ -109,6 +109,15 @@ const commitMessageOption = Options.text("commit-message").pipe(
   Options.optional,
 )
 
+const skipGateOption = Options.boolean("skip-gate").pipe(
+  Options.withDescription("Skip the pre-merge gate; requires --reason"),
+)
+
+const reasonOption = Options.text("reason").pipe(
+  Options.withDescription("Reason for bypassing the pre-merge gate"),
+  Options.optional,
+)
+
 const fileOption = Options.text("file").pipe(
   Options.withDescription("Local file to commit"),
 )
@@ -966,6 +975,124 @@ export const createPrCmd = Command.make(
     ),
 ).pipe(Command.withDescription("Open a pull request as ShitRat"))
 
+export class MergePrGateError extends Error {
+  constructor(
+    readonly code: "PR_BEHIND_BASE" | "PR_CHECKS_NOT_GREEN" | "PR_NOT_MERGEABLE",
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
+export interface MergeGateResult {
+  readonly behind_by: 0
+  readonly head_sha: string
+  readonly checks: number
+}
+
+export const runMergeGate = async (
+  octokit: GitHubOctokit,
+  repo: ReturnType<typeof parseRepo>,
+  number: number,
+): Promise<MergeGateResult> => {
+  const pull = await octokit.rest.pulls.get({ owner: repo.owner, repo: repo.repo, pull_number: number })
+  const headSha = pull.data.head.sha
+  const comparison = await octokit.rest.repos.compareCommitsWithBasehead({
+    owner: repo.owner,
+    repo: repo.repo,
+    basehead: `${pull.data.base.ref}...${pull.data.head.ref}`,
+  })
+  if (comparison.data.behind_by !== 0) {
+    throw new MergePrGateError("PR_BEHIND_BASE", `Pull request is ${comparison.data.behind_by} commit(s) behind ${pull.data.base.ref}.`)
+  }
+
+  const [checkRuns, commitStatuses] = await Promise.all([
+    octokit.paginate(octokit.rest.checks.listForRef, { owner: repo.owner, repo: repo.repo, ref: headSha, per_page: 100 }),
+    octokit.paginate(octokit.rest.repos.listCommitStatusesForRef, { owner: repo.owner, repo: repo.repo, ref: headSha, per_page: 100 }),
+  ])
+  const pendingOrFailed = [
+    ...checkRuns
+      .filter((check) => check.status !== "completed" || !["success", "neutral", "skipped"].includes(check.conclusion ?? ""))
+      .map((check) => `${check.name}: ${check.conclusion ?? check.status}`),
+    ...commitStatuses.filter((status) => status.state !== "success").map((status) => `${status.context}: ${status.state}`),
+  ]
+  const count = checkRuns.length + commitStatuses.length
+  if (count === 0 || pendingOrFailed.length > 0) {
+    throw new MergePrGateError("PR_CHECKS_NOT_GREEN", count === 0 ? "No checks or commit statuses exist for the pull request head." : pendingOrFailed.join(", "))
+  }
+  if (pull.data.mergeable === false) {
+    throw new MergePrGateError("PR_NOT_MERGEABLE", "GitHub reports this pull request is not mergeable.")
+  }
+  return { behind_by: 0, head_sha: headSha, checks: count }
+}
+
+export const mergePullRequest = async (
+  octokit: GitHubOctokit,
+  repo: ReturnType<typeof parseRepo>,
+  number: number,
+  options: {
+    readonly method: "merge" | "squash" | "rebase"
+    readonly commitTitle?: string
+    readonly commitMessage?: string
+    readonly skipGate?: boolean
+    readonly reason?: string
+  },
+) => {
+  if (options.skipGate && !options.reason?.trim()) throw new Error("--skip-gate requires a non-empty --reason.")
+  const gate = options.skipGate ? undefined : await runMergeGate(octokit, repo, number)
+  const merged = await octokit.rest.pulls.merge({
+    owner: repo.owner,
+    repo: repo.repo,
+    pull_number: number,
+    merge_method: options.method,
+    ...(options.commitTitle ? { commit_title: options.commitTitle } : {}),
+    ...(options.commitMessage ? { commit_message: options.commitMessage } : {}),
+  })
+  return { merged: merged.data, gate, gateSkippedReason: options.skipGate ? options.reason : undefined }
+}
+
+export const updatePullRequestBranch = async (
+  octokit: GitHubOctokit,
+  repo: ReturnType<typeof parseRepo>,
+  number: number,
+) => {
+  const pull = await octokit.rest.pulls.get({ owner: repo.owner, repo: repo.repo, pull_number: number })
+  return octokit.rest.pulls.updateBranch({
+    owner: repo.owner,
+    repo: repo.repo,
+    pull_number: number,
+    expected_head_sha: pull.data.head.sha,
+  })
+}
+
+export const updateBranchCmd = Command.make(
+  "update-branch",
+  { repo: repoArg, number: issueNumberArg },
+  ({ repo, number }) =>
+    Effect.gen(function* () {
+      const repoRef = parseRepo(repo)
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const updated = yield* Effect.tryPromise(() => updatePullRequestBranch(octokit, repoRef, number))
+      yield* printSuccess(
+        `update-branch ${repoRef.fullName} ${number}`,
+        { repo: repoRef.fullName, number, ...updated.data, actor: "shitratgit[bot]", installation_id: token.installationId },
+        [{
+          command: "merge-pr <repo> <number> --method squash",
+          description: "Wait for CI to pass again, then run the pre-merge gate",
+          params: { repo: { value: repoRef.fullName, required: true }, number: { value: number, required: true } },
+        }],
+      )
+    }).pipe(Effect.catchAll((error) =>
+      printFailure(
+        `update-branch ${repo} ${number}`,
+        error,
+        "UPDATE_BRANCH_FAILED",
+        "Verify Pull requests: write permission and that the pull request head has not changed. A 422 means the update could not be applied; inspect the PR and retry after resolving the cause.",
+        [{ command: "update-branch <repo> <number>", description: "Retry updating the pull request branch", params: { repo: { value: repo, required: true }, number: { value: number, required: true } } }],
+      ),
+    )),
+).pipe(Command.withDescription("Update a pull request branch with the latest base"))
+
 export const mergePrCmd = Command.make(
   "merge-pr",
   {
@@ -974,98 +1101,94 @@ export const mergePrCmd = Command.make(
     method: mergeMethodOption,
     commitTitle: commitTitleOption,
     commitMessage: commitMessageOption,
+    skipGate: skipGateOption,
+    reason: reasonOption,
     dryRun: dryRunOption,
   },
-  ({ repo, number, method, commitTitle, commitMessage, dryRun }) =>
+  ({ repo, number, method, commitTitle, commitMessage, skipGate, reason, dryRun }) =>
     Effect.gen(function* () {
       const repoRef = parseRepo(repo)
       const command = `merge-pr ${repoRef.fullName} ${number}`
       const resolvedCommitTitle = optionToUndefined(commitTitle)
       const resolvedCommitMessage = optionToUndefined(commitMessage)
+      const resolvedReason = optionToUndefined(reason)
+      if (skipGate && !resolvedReason?.trim()) {
+        yield* printFailure(command, "--skip-gate requires a non-empty --reason.", "USAGE_ERROR", "Pass --skip-gate --reason '<why this gate is being bypassed>'.")
+        return
+      }
 
       if (dryRun) {
-        yield* printSuccess(
-          command,
-          {
-            dry_run: true,
-            repo: repoRef.fullName,
-            number,
-            method,
-            commit_title: resolvedCommitTitle,
-            commit_message_present: Boolean(resolvedCommitMessage),
-            github_write: false,
-          },
-          [
-            {
-              command: "merge-pr <repo> <number> --method <method>",
-              description: "Merge this pull request as ShitRat after policy approval",
-              params: {
-                repo: { value: repoRef.fullName, required: true },
-                number: { value: number, required: true },
-                method: { value: method, enum: ["merge", "squash", "rebase"], default: "squash" },
-              },
-            },
-          ],
-        )
+        const client = yield* Effect.either(createRepoOctokit(repoRef))
+        let gate: MergeGateResult | undefined
+        let gateSkippedReason: string | undefined
+        let gateFailure: { code: string; message: string } | undefined
+        if (client._tag === "Right") {
+          if (skipGate) gateSkippedReason = resolvedReason
+          else {
+            const checked = yield* Effect.either(Effect.tryPromise(() => runMergeGate(client.right.octokit, repoRef, number)))
+            if (checked._tag === "Right") gate = checked.right
+            else gateFailure = {
+              code: checked.left instanceof MergePrGateError ? checked.left.code : "MERGE_PR_FAILED",
+              message: errorMessage(checked.left),
+            }
+          }
+        }
+        yield* printSuccess(command, {
+          dry_run: true,
+          repo: repoRef.fullName,
+          number,
+          method,
+          commit_title: resolvedCommitTitle,
+          commit_message_present: Boolean(resolvedCommitMessage),
+          ...(gate ? { gate: { passed: true, ...gate } } : {}),
+          ...(gateFailure ? { gate: { passed: false, ...gateFailure } } : {}),
+          ...(gateSkippedReason ? { gate_skipped_reason: gateSkippedReason } : {}),
+          github_write: false,
+        }, [{
+          command: "merge-pr <repo> <number> --method <method>",
+          description: "Merge this pull request after the pre-merge gate passes",
+          params: { repo: { value: repoRef.fullName, required: true }, number: { value: number, required: true }, method: { value: method, enum: ["merge", "squash", "rebase"], default: "squash" } },
+        }])
         return
       }
 
       const { octokit, token } = yield* createRepoOctokit(repoRef)
-      const merged = yield* Effect.tryPromise({
-        try: () =>
-          octokit.rest.pulls.merge({
-            owner: repoRef.owner,
-            repo: repoRef.repo,
-            pull_number: number,
-            merge_method: method,
-            ...(resolvedCommitTitle ? { commit_title: resolvedCommitTitle } : {}),
-            ...(resolvedCommitMessage ? { commit_message: resolvedCommitMessage } : {}),
-          }),
+      const result = yield* Effect.tryPromise({
+        try: () => mergePullRequest(octokit, repoRef, number, {
+          method,
+          ...(resolvedCommitTitle ? { commitTitle: resolvedCommitTitle } : {}),
+          ...(resolvedCommitMessage ? { commitMessage: resolvedCommitMessage } : {}),
+          skipGate,
+          ...(resolvedReason ? { reason: resolvedReason } : {}),
+        }),
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
       })
-
-      yield* printSuccess(
-        command,
-        {
-          repo: repoRef.fullName,
-          number,
-          merged: merged.data.merged,
-          message: merged.data.message,
-          sha: merged.data.sha,
-          method,
-          actor: "shitratgit[bot]",
-          installation_id: token.installationId,
-        },
-        [
-          {
-            command: "status <repo>",
-            description: "Verify ShitRat still has access to this repository",
-            params: { repo: { value: repoRef.fullName, required: true } },
-          },
-        ],
-      )
+      yield* printSuccess(command, {
+        repo: repoRef.fullName,
+        number,
+        merged: result.merged.merged,
+        message: result.merged.message,
+        sha: result.merged.sha,
+        method,
+        ...(result.gate ? { gate: result.gate } : {}),
+        ...(result.gateSkippedReason ? { gate_skipped_reason: result.gateSkippedReason } : {}),
+        actor: "shitratgit[bot]",
+        installation_id: token.installationId,
+      }, [{ command: "status <repo>", description: "Verify ShitRat still has access to this repository", params: { repo: { value: repoRef.fullName, required: true } } }])
     }).pipe(
       Effect.catchAll((error) =>
         printFailure(
           `merge-pr ${repo} ${number}`,
           error,
-          "MERGE_PR_FAILED",
+          error instanceof MergePrGateError ? error.code : "MERGE_PR_FAILED",
           "Verify Pull requests: write permission, branch protection, review requirements, mergeability, and project policy approval. Use --dry-run first if unsure.",
-          [
-            {
-              command: "merge-pr <repo> <number> --method squash --dry-run",
-              description: "Preview or retry merging a pull request as ShitRat",
-              params: {
-                repo: { value: repo, required: true },
-                number: { value: number, required: true },
-                method: { enum: ["merge", "squash", "rebase"], default: "squash" },
-              },
-            },
-          ],
+          error instanceof MergePrGateError && error.code === "PR_BEHIND_BASE"
+            ? [{ command: "update-branch <repo> <number>", description: "Update this PR with the base branch, then rerun CI", params: { repo: { value: repo, required: true }, number: { value: number, required: true } } }]
+            : [{ command: "merge-pr <repo> <number> --method squash --dry-run", description: "Preview or retry merging a pull request as ShitRat", params: { repo: { value: repo, required: true }, number: { value: number, required: true }, method: { enum: ["merge", "squash", "rebase"], default: "squash" } } }],
         ),
       ),
     ),
-).pipe(Command.withDescription("Merge a pull request as ShitRat"))
+).pipe(Command.withDescription("Gate and merge a pull request as ShitRat"))
 
 export const editPrCmd = Command.make(
   "edit-pr",

@@ -32,6 +32,7 @@ import {
   pushCmd,
   reviewCmd,
   statusCmd,
+  updateBranchCmd,
 } from "./commands/github.js"
 import { inboxCmd } from "./commands/inbox.js"
 import { errorMessage, failure, json, success } from "./response.js"
@@ -65,7 +66,8 @@ const root = Command.make("shitrat", {}, () =>
               create_pr:
                 "shitrat create-pr <owner/repo> --title <title> --head <branch> --base main --body-file <path>",
               merge_pr:
-                "shitrat merge-pr <owner/repo> <pull-number> --method squash --dry-run",
+                "shitrat merge-pr <owner/repo> <pull-number> --method squash [--skip-gate --reason <text>]",
+              update_branch: "shitrat update-branch <owner/repo> <pull-number>",
               install:
                 "shitrat install pi|claude|codex-desktop --dry-run",
               update:
@@ -173,12 +175,20 @@ const root = Command.make("shitrat", {}, () =>
               },
             },
             {
-              command: "merge-pr <repo> <number> --method squash [--dry-run]",
-              description: "Merge a pull request as ShitRat when policy allows",
+              command: "merge-pr <repo> <number> --method squash [--dry-run] [--skip-gate --reason <text>]",
+              description: "Merge a pull request as ShitRat after the pre-merge gate passes",
               params: {
                 repo: { required: true, description: "Repository in owner/repo form" },
                 number: { required: true, description: "PR number" },
                 method: { enum: ["merge", "squash", "rebase"], default: "squash" },
+              },
+            },
+            {
+              command: "update-branch <repo> <number>",
+              description: "Update the pull request branch; rerun CI before merging",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                number: { required: true, description: "Pull request number" },
               },
             },
           ],
@@ -198,6 +208,7 @@ const root = Command.make("shitrat", {}, () =>
     createPrCmd,
     mergePrCmd,
     editPrCmd,
+    updateBranchCmd,
     commitFileCmd,
     commitFilesCmd,
     inboxCmd,
