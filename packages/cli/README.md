@@ -63,6 +63,14 @@ bun run src/cli.ts reply skillrecordings/egghead-next 1608 123456 --body-file re
 # Edit a pull request's title, body, base branch, or state as shitratgit[bot]
 bun run src/cli.ts edit-pr skillrecordings/egghead-next 1608 --title "fix: clearer title" --body-file pr.md --base main --state open
 
+# Mark a draft pull request ready for review as shitratgit[bot]; --dry-run reads it and writes nothing
+bun run src/cli.ts ready-pr badass-courses/drovr 698 --dry-run
+
+# Add a pull request to its base branch's merge queue; reports the entry's position and state.
+# The queue's ruleset picks the merge method; --method only refuses when it differs.
+# merge-pr answers MERGE_QUEUE_REQUIRED on a queue-required branch and points here.
+bun run src/cli.ts enqueue-pr badass-courses/drovr 696 --method squash --dry-run
+
 # Preview a branch merge as shitratgit[bot]
 bun run src/cli.ts merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch" --dry-run
 

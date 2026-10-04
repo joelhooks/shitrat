@@ -19,6 +19,7 @@ import {
   resolvePushPlan,
   ShitRatPushError,
 } from "../git-push.js"
+import { enqueuePullRequest, isMergeQueueRequired, readyPullRequest } from "../merge-queue.js"
 import { errorMessage, failure, json, success, type NextAction } from "../response.js"
 
 const repoArg = Args.text({ name: "repo" }).pipe(
@@ -97,6 +98,15 @@ const draftOption = Options.boolean("draft").pipe(
 const mergeMethodOption = Options.choice("method", ["merge", "squash", "rebase"] as const).pipe(
   Options.withDescription("Pull request merge method"),
   Options.withDefault("squash" as const),
+)
+
+const queueMethodOption = Options.choice("method", ["merge", "squash", "rebase"] as const).pipe(
+  Options.withDescription("Expected merge queue method; refuses when the queue is configured differently"),
+  Options.optional,
+)
+
+const readDryRunOption = Options.boolean("dry-run").pipe(
+  Options.withDescription("Read the pull request from GitHub and report what would change, without writing"),
 )
 
 const commitTitleOption = Options.text("commit-title").pipe(
@@ -1046,7 +1056,24 @@ export const mergePrCmd = Command.make(
       )
     }).pipe(
       Effect.catchAll((error) =>
-        printFailure(
+        isMergeQueueRequired(error)
+          ? printFailure(
+              `merge-pr ${repo} ${number}`,
+              `${errorMessage(error)} Use enqueue-pr: this branch requires the merge queue.`,
+              "MERGE_QUEUE_REQUIRED",
+              "This base branch only merges through its merge queue. Use enqueue-pr instead of merge-pr.",
+              [
+                {
+                  command: "enqueue-pr <repo> <number> --dry-run",
+                  description: "Preview adding this pull request to the merge queue as ShitRat",
+                  params: {
+                    repo: { value: repo, required: true },
+                    number: { value: number, required: true },
+                  },
+                },
+              ],
+            )
+          : printFailure(
           `merge-pr ${repo} ${number}`,
           error,
           "MERGE_PR_FAILED",
@@ -1066,6 +1093,118 @@ export const mergePrCmd = Command.make(
       ),
     ),
 ).pipe(Command.withDescription("Merge a pull request as ShitRat"))
+
+export const readyPrCmd = Command.make(
+  "ready-pr",
+  { repo: repoArg, number: issueNumberArg, dryRun: readDryRunOption },
+  ({ repo, number, dryRun }) =>
+    Effect.gen(function* () {
+      const repoRef = parseRepo(repo)
+      const command = `ready-pr ${repoRef.fullName} ${number}`
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const ready = yield* Effect.tryPromise({
+        try: () => readyPullRequest(octokit.graphql, { owner: repoRef.owner, repo: repoRef.repo, number }, dryRun),
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      })
+      yield* printSuccess(
+        command,
+        {
+          ...ready,
+          repo: repoRef.fullName,
+          dry_run: dryRun,
+          github_write: ready.changed,
+          ...(dryRun ? {} : { actor: "shitratgit[bot]", installation_id: token.installationId }),
+        },
+        [
+          ...(dryRun && ready.was_draft
+            ? [
+                {
+                  command: "ready-pr <repo> <number>",
+                  description: "Mark this draft ready for review as ShitRat",
+                  params: { repo: { value: repoRef.fullName, required: true }, number: { value: number, required: true } },
+                },
+              ]
+            : []),
+          {
+            command: "enqueue-pr <repo> <number> --dry-run",
+            description: "Preview adding this pull request to the merge queue",
+            params: { repo: { value: repoRef.fullName, required: true }, number: { value: number, required: true } },
+          },
+        ],
+      )
+    }).pipe(
+      Effect.catchAll((error) =>
+        printFailure(
+          `ready-pr ${repo} ${number}`,
+          error,
+          "READY_PR_FAILED",
+          "Verify Pull requests: write permission, that the pull request exists and is open.",
+        ),
+      ),
+    ),
+).pipe(Command.withDescription("Mark a draft pull request ready for review as ShitRat"))
+
+export const enqueuePrCmd = Command.make(
+  "enqueue-pr",
+  { repo: repoArg, number: issueNumberArg, method: queueMethodOption, dryRun: readDryRunOption },
+  ({ repo, number, method, dryRun }) =>
+    Effect.gen(function* () {
+      const repoRef = parseRepo(repo)
+      const command = `enqueue-pr ${repoRef.fullName} ${number}`
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const queued = yield* Effect.tryPromise({
+        try: () =>
+          enqueuePullRequest(
+            octokit.graphql,
+            { owner: repoRef.owner, repo: repoRef.repo, number },
+            optionToUndefined(method),
+            dryRun,
+          ),
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      })
+      yield* printSuccess(
+        command,
+        {
+          ...queued,
+          repo: repoRef.fullName,
+          dry_run: dryRun,
+          github_write: queued.enqueued,
+          ...(dryRun ? {} : { actor: "shitratgit[bot]", installation_id: token.installationId }),
+        },
+        dryRun && !queued.already_queued
+          ? [
+              {
+                command: "enqueue-pr <repo> <number>",
+                description: "Add this pull request to the merge queue as ShitRat",
+                params: { repo: { value: repoRef.fullName, required: true }, number: { value: number, required: true } },
+              },
+            ]
+          : [
+              {
+                command: "enqueue-pr <repo> <number> --dry-run",
+                description: "Re-read this pull request's queue position and state",
+                params: { repo: { value: repoRef.fullName, required: true }, number: { value: number, required: true } },
+              },
+            ],
+      )
+    }).pipe(
+      Effect.catchAll((error) =>
+        printFailure(
+          `enqueue-pr ${repo} ${number}`,
+          error,
+          "ENQUEUE_PR_FAILED",
+          "The pull request must be open, not a draft, free of conflicts, and its base branch must have a merge queue. Without a queue, use merge-pr.",
+          [
+            {
+              command: "enqueue-pr <repo> <number> --dry-run",
+              description: "Re-check whether this pull request can be queued",
+              params: { repo: { value: repo, required: true }, number: { value: number, required: true } },
+            },
+          ],
+        ),
+      ),
+    ),
+).pipe(Command.withDescription("Add a pull request to its base branch's merge queue as ShitRat"))
 
 export const editPrCmd = Command.make(
   "edit-pr",

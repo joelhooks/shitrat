@@ -26,10 +26,12 @@ import {
   replyCmd,
   createPrCmd,
   editPrCmd,
+  enqueuePrCmd,
   installationsCmd,
   mergeCmd,
   mergePrCmd,
   pushCmd,
+  readyPrCmd,
   reviewCmd,
   statusCmd,
 } from "./commands/github.js"
@@ -66,6 +68,8 @@ const root = Command.make("shitrat", {}, () =>
                 "shitrat create-pr <owner/repo> --title <title> --head <branch> --base main --body-file <path>",
               merge_pr:
                 "shitrat merge-pr <owner/repo> <pull-number> --method squash --dry-run",
+              ready_pr: "shitrat ready-pr <owner/repo> <pull-number> [--dry-run]",
+              enqueue_pr: "shitrat enqueue-pr <owner/repo> <pull-number> [--method merge|squash|rebase] [--dry-run]",
               install:
                 "shitrat install pi|claude|codex-desktop --dry-run",
               update:
@@ -181,6 +185,23 @@ const root = Command.make("shitrat", {}, () =>
                 method: { enum: ["merge", "squash", "rebase"], default: "squash" },
               },
             },
+            {
+              command: "ready-pr <repo> <number> [--dry-run]",
+              description: "Mark a draft pull request ready for review as ShitRat",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                number: { required: true, description: "PR number" },
+              },
+            },
+            {
+              command: "enqueue-pr <repo> <number> [--method merge|squash|rebase] [--dry-run]",
+              description: "Add a pull request to its base branch's merge queue as ShitRat; merge-pr refuses on queue-required branches",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                number: { required: true, description: "PR number" },
+                method: { enum: ["merge", "squash", "rebase"], description: "Expected queue method; refuses on mismatch" },
+              },
+            },
           ],
         ),
       ),
@@ -197,6 +218,8 @@ const root = Command.make("shitrat", {}, () =>
     pushCmd,
     createPrCmd,
     mergePrCmd,
+    readyPrCmd,
+    enqueuePrCmd,
     editPrCmd,
     commitFileCmd,
     commitFilesCmd,
