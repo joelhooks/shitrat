@@ -17,6 +17,8 @@ shitrat comment skillrecordings/migrate-egghead 26 --body-file comment.md
 shitrat review skillrecordings/egghead-next 1608 --event REQUEST_CHANGES --body-file review.md
 shitrat reply skillrecordings/egghead-next 1608 123456 --body-file reply.md
 shitrat edit-pr skillrecordings/egghead-next 1608 --title "fix: clearer title" --body-file pr.md --base main --state open
+shitrat ready-pr badass-courses/drovr 698 --dry-run
+shitrat enqueue-pr badass-courses/drovr 696 --dry-run
 shitrat merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch"
 shitrat push joelhooks/shitrat-cli --repo-dir /path/to/checkout
 shitrat commit-file joelhooks/shitrat-cli --branch main --message "docs: update notes" --file README.md
@@ -40,6 +42,8 @@ If the pi extension is loaded, prefer the tools:
 - Do not use Joel's `gh pr review` when the desired actor is ShitRat.
 - Use `shitrat reply` / `shitrat_reply` for inline review threads; `comment` posts to the PR conversation, not an inline thread.
 - Use `shitrat edit-pr` / `shitrat_edit_pr` to update a PR's title, body, base, or open/closed state instead of `gh pr edit`.
+- Use `shitrat ready-pr` instead of `gh pr ready` to take a pull request out of draft.
+- On a branch with a merge queue, `merge-pr` fails with `MERGE_QUEUE_REQUIRED`; use `shitrat enqueue-pr`, which queues the head it read (`expectedHeadOid`) and reports the queue position and state. The queue's ruleset decides the merge method.
 - Use `shitrat status <owner/repo>` first when repo access is uncertain.
 - Use `--body-file` for non-trivial Markdown so shell quoting does not mangle review text.
 - Use `--dry-run` before writing unless Joel explicitly asked to commit/merge as ShitRat.
