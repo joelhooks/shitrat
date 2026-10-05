@@ -44,6 +44,12 @@ const READY_MUTATION = `mutation($id: ID!) {
   }
 }`
 
+const DRAFT_MUTATION = `mutation($id: ID!) {
+  convertPullRequestToDraft(input: { pullRequestId: $id }) {
+    pullRequest { isDraft url }
+  }
+}`
+
 const ENQUEUE_MUTATION = `mutation($id: ID!, $head: GitObjectID!) {
   enqueuePullRequest(input: { pullRequestId: $id, expectedHeadOid: $head }) {
     mergeQueueEntry { position state }
@@ -115,6 +121,24 @@ export const readyPullRequest = async (
     { id: pull.id },
   )
   return { ...base, was_draft: true, is_draft: data.markPullRequestReadyForReview.pullRequest.isDraft, changed: true }
+}
+
+export const convertPullRequestToDraft = async (
+  graphql: GraphqlClient,
+  ref: PullRequestRef,
+  dryRun: boolean,
+) => {
+  const pull = await readPullRequestQueueState(graphql, ref)
+  if (pull.state !== "OPEN") throw new Error(`Pull request #${pull.number} is ${pull.state.toLowerCase()}, not open.`)
+  // GitHub drops a pull request from its merge queue when it becomes a draft.
+  const base = { number: pull.number, url: pull.url, head: pull.headRefOid, was_queued: pull.isInMergeQueue }
+  if (pull.isDraft) return { ...base, was_draft: true, is_draft: true, changed: false }
+  if (dryRun) return { ...base, was_draft: false, is_draft: false, changed: false }
+  const data = await graphql<{ convertPullRequestToDraft: { pullRequest: { isDraft: boolean; url: string } } }>(
+    DRAFT_MUTATION,
+    { id: pull.id },
+  )
+  return { ...base, was_draft: false, is_draft: data.convertPullRequestToDraft.pullRequest.isDraft, changed: true }
 }
 
 export const enqueuePullRequest = async (
