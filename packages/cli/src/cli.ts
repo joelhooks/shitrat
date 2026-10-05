@@ -24,15 +24,18 @@ import {
   commitFilesCmd,
   commentCmd,
   replyCmd,
+  convertToDraftCmd,
   createPrCmd,
   editPrCmd,
   enqueuePrCmd,
   installationsCmd,
+  labelCmd,
   mergeCmd,
   mergePrCmd,
   pushCmd,
   readyPrCmd,
   reviewCmd,
+  setStatusCmd,
   statusCmd,
 } from "./commands/github.js"
 import { inboxCmd } from "./commands/inbox.js"
@@ -70,6 +73,10 @@ const root = Command.make("shitrat", {}, () =>
                 "shitrat merge-pr <owner/repo> <pull-number> --method squash --dry-run",
               ready_pr: "shitrat ready-pr <owner/repo> <pull-number> [--dry-run]",
               enqueue_pr: "shitrat enqueue-pr <owner/repo> <pull-number> [--method merge|squash|rebase] [--dry-run]",
+              convert_to_draft: "shitrat convert-to-draft <owner/repo> <pull-number> [--dry-run]",
+              label: "shitrat label <owner/repo> <issue-or-pr-number> [--add <label>...] [--remove <label>...] [--dry-run]",
+              set_status:
+                "shitrat set-status <owner/repo> <sha> --state pending|success|failure|error --context <name> --description <text> [--target-url <url>] [--dry-run]",
               install:
                 "shitrat install pi|claude|codex-desktop --dry-run",
               update:
@@ -202,6 +209,35 @@ const root = Command.make("shitrat", {}, () =>
                 method: { enum: ["merge", "squash", "rebase"], description: "Expected queue method; refuses on mismatch" },
               },
             },
+            {
+              command: "convert-to-draft <repo> <number> [--dry-run]",
+              description: "Convert a pull request to a draft as ShitRat; this also takes it out of the merge queue",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                number: { required: true, description: "PR number" },
+              },
+            },
+            {
+              command: "label <repo> <number> [--add <label>...] [--remove <label>...] [--dry-run]",
+              description: "Add and remove labels on an issue or pull request as ShitRat",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                number: { required: true, description: "Issue or PR number" },
+                add: { description: "Repeat for each label to add; it must exist in the repository" },
+                remove: { description: "Repeat for each label to remove; absent labels are a no-op" },
+              },
+            },
+            {
+              command: "set-status <repo> <sha> --state <state> --context <name> --description <text> [--target-url <url>] [--dry-run]",
+              description: "Create a commit status on a sha as ShitRat",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                sha: { required: true, description: "Commit sha; short shas resolve to the full sha or are refused" },
+                state: { enum: ["pending", "success", "failure", "error"], required: true },
+                context: { required: true, description: "Status context name" },
+                description: { required: true, description: "At most 140 characters" },
+              },
+            },
           ],
         ),
       ),
@@ -220,6 +256,9 @@ const root = Command.make("shitrat", {}, () =>
     mergePrCmd,
     readyPrCmd,
     enqueuePrCmd,
+    convertToDraftCmd,
+    labelCmd,
+    setStatusCmd,
     editPrCmd,
     commitFileCmd,
     commitFilesCmd,

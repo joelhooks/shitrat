@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
+  convertPullRequestToDraft,
   enqueuePullRequest,
   isMergeQueueRequired,
   readyPullRequest,
@@ -31,6 +32,9 @@ const github = (pull: PullRequestQueueState, queueMethod: string | null = "SQUAS
     calls.push({ query, variables })
     if (query.includes("enqueuePullRequest")) {
       return { enqueuePullRequest: { mergeQueueEntry: { position: 3, state: "QUEUED" } } } as T
+    }
+    if (query.includes("convertPullRequestToDraft")) {
+      return { convertPullRequestToDraft: { pullRequest: { isDraft: true, url: pull.url } } } as T
     }
     if (query.includes("markPullRequestReadyForReview")) {
       return { markPullRequestReadyForReview: { pullRequest: { isDraft: false, url: pull.url } } } as T
@@ -100,6 +104,31 @@ describe("ready-pr", () => {
     const preview = github(openPull({ isDraft: true }))
     expect(await readyPullRequest(preview.graphql, ref, true)).toMatchObject({ was_draft: true, changed: false })
     expect([...ready.writes(), ...preview.writes()]).toEqual([])
+  })
+})
+
+describe("convert-to-draft", () => {
+  test("converts a ready pull request by its node id and reports that it was queued", async () => {
+    const gh = github(openPull({ isInMergeQueue: true, mergeQueueEntry: { position: 2, state: "QUEUED" } }))
+    const result = await convertPullRequestToDraft(gh.graphql, ref, false)
+    expect(gh.writes()).toHaveLength(1)
+    expect(gh.writes()[0]?.query).toContain("convertPullRequestToDraft")
+    expect(gh.writes()[0]?.variables).toEqual({ id: "PR_7" })
+    expect(result).toMatchObject({ was_draft: false, is_draft: true, changed: true, was_queued: true })
+  })
+
+  test("leaves a draft and a dry run unwritten", async () => {
+    const draft = github(openPull({ isDraft: true }))
+    expect(await convertPullRequestToDraft(draft.graphql, ref, false)).toMatchObject({ was_draft: true, changed: false })
+    const preview = github(openPull())
+    expect(await convertPullRequestToDraft(preview.graphql, ref, true)).toMatchObject({ was_draft: false, is_draft: false, changed: false })
+    expect([...draft.writes(), ...preview.writes()]).toEqual([])
+  })
+
+  test("refuses a closed pull request without writing", async () => {
+    const gh = github(openPull({ state: "MERGED" }))
+    await expect(convertPullRequestToDraft(gh.graphql, ref, false)).rejects.toThrow(/merged, not open/)
+    expect(gh.writes()).toEqual([])
   })
 })
 

@@ -19,7 +19,8 @@ import {
   resolvePushPlan,
   ShitRatPushError,
 } from "../git-push.js"
-import { enqueuePullRequest, isMergeQueueRequired, readyPullRequest } from "../merge-queue.js"
+import { labelIssue, setCommitStatus } from "../labels-statuses.js"
+import { convertPullRequestToDraft, enqueuePullRequest, isMergeQueueRequired, readyPullRequest } from "../merge-queue.js"
 import { errorMessage, failure, json, success, type NextAction } from "../response.js"
 
 const repoArg = Args.text({ name: "repo" }).pipe(
@@ -107,6 +108,45 @@ const queueMethodOption = Options.choice("method", ["merge", "squash", "rebase"]
 
 const readDryRunOption = Options.boolean("dry-run").pipe(
   Options.withDescription("Read the pull request from GitHub and report what would change, without writing"),
+)
+
+const addLabelOption = Options.text("add").pipe(
+  Options.withDescription("Label to add; repeat for each label. The label must already exist in the repository"),
+  Options.repeated,
+)
+
+const removeLabelOption = Options.text("remove").pipe(
+  Options.withDescription("Label to remove; repeat for each label. Removing a label that is not there is a no-op"),
+  Options.repeated,
+)
+
+const labelDryRunOption = Options.boolean("dry-run").pipe(
+  Options.withDescription("Read the issue or pull request and its labels and report what would change, without writing"),
+)
+
+const shaArg = Args.text({ name: "sha" }).pipe(
+  Args.withDescription("Commit sha; a short sha is resolved to the full sha, and refused when GitHub cannot resolve it to one commit"),
+)
+
+const commitStateOption = Options.choice("state", ["pending", "success", "failure", "error"] as const).pipe(
+  Options.withDescription("Commit status state"),
+)
+
+const statusContextOption = Options.text("context").pipe(
+  Options.withDescription("Status context name, e.g. gavel/hold"),
+)
+
+const statusDescriptionOption = Options.text("description").pipe(
+  Options.withDescription("Short status description, at most 140 characters"),
+)
+
+const targetUrlOption = Options.text("target-url").pipe(
+  Options.withDescription("Optional http(s) URL the status links to"),
+  Options.optional,
+)
+
+const statusDryRunOption = Options.boolean("dry-run").pipe(
+  Options.withDescription("Resolve the sha and read the current status for this context, without writing"),
 )
 
 const commitTitleOption = Options.text("commit-title").pipe(
@@ -1205,6 +1245,164 @@ export const enqueuePrCmd = Command.make(
       ),
     ),
 ).pipe(Command.withDescription("Add a pull request to its base branch's merge queue as ShitRat"))
+
+export const convertToDraftCmd = Command.make(
+  "convert-to-draft",
+  { repo: repoArg, number: issueNumberArg, dryRun: readDryRunOption },
+  ({ repo, number, dryRun }) =>
+    Effect.gen(function* () {
+      const repoRef = parseRepo(repo)
+      const command = `convert-to-draft ${repoRef.fullName} ${number}`
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const draft = yield* Effect.tryPromise({
+        try: () => convertPullRequestToDraft(octokit.graphql, { owner: repoRef.owner, repo: repoRef.repo, number }, dryRun),
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      })
+      yield* printSuccess(
+        command,
+        {
+          ...draft,
+          repo: repoRef.fullName,
+          dry_run: dryRun,
+          github_write: draft.changed,
+          ...(dryRun ? {} : { actor: "shitratgit[bot]", installation_id: token.installationId }),
+        },
+        dryRun && !draft.was_draft
+          ? [
+              {
+                command: "convert-to-draft <repo> <number>",
+                description: "Convert this pull request to a draft as ShitRat",
+                params: { repo: { value: repoRef.fullName, required: true }, number: { value: number, required: true } },
+              },
+            ]
+          : [
+              {
+                command: "ready-pr <repo> <number> --dry-run",
+                description: "Preview marking this draft ready for review again",
+                params: { repo: { value: repoRef.fullName, required: true }, number: { value: number, required: true } },
+              },
+            ],
+      )
+    }).pipe(
+      Effect.catchAll((error) =>
+        printFailure(
+          `convert-to-draft ${repo} ${number}`,
+          error,
+          "CONVERT_TO_DRAFT_FAILED",
+          "Verify Pull requests: write permission, that the pull request exists and is open.",
+        ),
+      ),
+    ),
+).pipe(Command.withDescription("Convert a pull request to a draft as ShitRat; this also takes it out of the merge queue"))
+
+export const labelCmd = Command.make(
+  "label",
+  { repo: repoArg, number: issueNumberArg, add: addLabelOption, remove: removeLabelOption, dryRun: labelDryRunOption },
+  ({ repo, number, add, remove, dryRun }) =>
+    Effect.gen(function* () {
+      const repoRef = parseRepo(repo)
+      const command = `label ${repoRef.fullName} ${number}`
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const labeled = yield* Effect.tryPromise({
+        try: () => labelIssue(octokit.rest.issues, { owner: repoRef.owner, repo: repoRef.repo, number }, add, remove, dryRun),
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      })
+      const labelFlags = [...labeled.add.map((label) => `--add "${label}"`), ...labeled.remove.map((label) => `--remove "${label}"`)]
+      yield* printSuccess(
+        command,
+        {
+          ...labeled,
+          repo: repoRef.fullName,
+          dry_run: dryRun,
+          github_write: labeled.changed,
+          ...(dryRun ? {} : { actor: "shitratgit[bot]", installation_id: token.installationId }),
+        },
+        dryRun && labelFlags.length > 0
+          ? [
+              {
+                command: `label <repo> <number> ${labelFlags.join(" ")}`,
+                description: "Apply these label changes as ShitRat",
+                params: { repo: { value: repoRef.fullName, required: true }, number: { value: number, required: true } },
+              },
+            ]
+          : [],
+      )
+    }).pipe(
+      Effect.catchAll((error) =>
+        printFailure(
+          `label ${repo} ${number}`,
+          error,
+          "LABEL_FAILED",
+          "Verify Issues: write permission, that the issue or pull request exists, and that each --add label exists in the repository.",
+        ),
+      ),
+    ),
+).pipe(Command.withDescription("Add and remove labels on an issue or pull request as ShitRat"))
+
+export const setStatusCmd = Command.make(
+  "set-status",
+  {
+    repo: repoArg,
+    sha: shaArg,
+    state: commitStateOption,
+    context: statusContextOption,
+    description: statusDescriptionOption,
+    targetUrl: targetUrlOption,
+    dryRun: statusDryRunOption,
+  },
+  ({ repo, sha, state, context, description, targetUrl, dryRun }) =>
+    Effect.gen(function* () {
+      const repoRef = parseRepo(repo)
+      const command = `set-status ${repoRef.fullName} ${sha}`
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const resolvedTargetUrl = optionToUndefined(targetUrl)
+      const status = yield* Effect.tryPromise({
+        try: () =>
+          setCommitStatus(
+            octokit.rest.repos,
+            { owner: repoRef.owner, repo: repoRef.repo },
+            { sha, state, context, description, targetUrl: resolvedTargetUrl },
+            dryRun,
+          ),
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      })
+      yield* printSuccess(
+        command,
+        {
+          ...status,
+          repo: repoRef.fullName,
+          dry_run: dryRun,
+          github_write: status.changed,
+          ...(dryRun ? {} : { actor: "shitratgit[bot]", installation_id: token.installationId }),
+        },
+        dryRun
+          ? [
+              {
+                command: "set-status <repo> <sha> --state <state> --context <context> --description <description>",
+                description: "Create this commit status as ShitRat",
+                params: {
+                  repo: { value: repoRef.fullName, required: true },
+                  sha: { value: status.sha, required: true },
+                  state: { value: status.state, enum: ["pending", "success", "failure", "error"], required: true },
+                  context: { value: status.context, required: true },
+                  description: { value: status.description, required: true },
+                  ...(resolvedTargetUrl !== undefined ? { "target-url": { value: resolvedTargetUrl } } : {}),
+                },
+              },
+            ]
+          : [],
+      )
+    }).pipe(
+      Effect.catchAll((error) =>
+        printFailure(
+          `set-status ${repo} ${sha}`,
+          error,
+          "SET_STATUS_FAILED",
+          "Verify Commit statuses: write permission, that the sha names one commit in the repository, and that --description is at most 140 characters.",
+        ),
+      ),
+    ),
+).pipe(Command.withDescription("Create a commit status on a sha as ShitRat"))
 
 export const editPrCmd = Command.make(
   "edit-pr",

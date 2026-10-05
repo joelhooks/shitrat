@@ -71,6 +71,16 @@ bun run src/cli.ts ready-pr badass-courses/drovr 698 --dry-run
 # merge-pr answers MERGE_QUEUE_REQUIRED on a queue-required branch and points here.
 bun run src/cli.ts enqueue-pr badass-courses/drovr 696 --method squash --dry-run
 
+# Convert a pull request back to a draft; GitHub also drops it from the merge queue
+bun run src/cli.ts convert-to-draft badass-courses/drovr 696 --dry-run
+
+# Add and remove labels on an issue or pull request. --add refuses a label the repo lacks;
+# --remove of a label that is not there is a no-op.
+bun run src/cli.ts label badass-courses/drovr 886 --add "NO MERGE" --dry-run
+
+# Create a commit status. A short sha is resolved to the full sha, or refused if GitHub cannot.
+bun run src/cli.ts set-status badass-courses/drovr <sha> --state failure --context gavel/hold --description "Held by review" --dry-run
+
 # Preview a branch merge as shitratgit[bot]
 bun run src/cli.ts merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch" --dry-run
 
