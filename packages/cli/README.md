@@ -87,6 +87,9 @@ bun run src/cli.ts checks badass-courses/drovr <sha>
 bun run src/cli.ts pr-status badass-courses/drovr 867
 # Needs Actions: read on the app; without it, PERMISSION_DENIED. --tail 0 returns the whole log.
 bun run src/cli.ts run-log badass-courses/drovr <job-id> --tail 300
+# Rerun a workflow run, or only its failed jobs. Reports run_attempt as GitHub reads it back;
+# 403/404/409 come back as typed errors (PERMISSION_DENIED, NOT_FOUND, CONFLICT).
+bun run src/cli.ts rerun badass-courses/drovr <run-id> --failed --dry-run
 
 # Preview a branch merge as shitratgit[bot]
 bun run src/cli.ts merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch" --dry-run

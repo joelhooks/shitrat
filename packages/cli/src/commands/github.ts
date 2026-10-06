@@ -19,7 +19,7 @@ import {
   resolvePushPlan,
   ShitRatPushError,
 } from "../git-push.js"
-import { CiReadError, isFailingRun, readChecks, readJobLog, readPullRequestStatus } from "../ci-reads.js"
+import { CiReadError, isFailingRun, readChecks, readJobLog, readPullRequestStatus, rerunWorkflowRun } from "../ci-reads.js"
 import { labelIssue, setCommitStatus } from "../labels-statuses.js"
 import { convertPullRequestToDraft, enqueuePullRequest, isMergeQueueRequired, readyPullRequest } from "../merge-queue.js"
 import { errorMessage, failure, json, success, type NextAction } from "../response.js"
@@ -163,6 +163,18 @@ const tailOption = Options.integer("tail").pipe(
   Options.withDefault(300),
 )
 
+const runIdArg = Args.integer({ name: "run-id" }).pipe(
+  Args.withDescription("GitHub Actions workflow run id"),
+)
+
+const failedJobsOption = Options.boolean("failed").pipe(
+  Options.withDescription("Rerun only the failed jobs (and their dependents) instead of the whole run"),
+)
+
+const rerunDryRunOption = Options.boolean("dry-run").pipe(
+  Options.withDescription("Read the run and report what would be rerun, without writing"),
+)
+
 const commitTitleOption = Options.text("commit-title").pipe(
   Options.withDescription("Optional merge commit title"),
   Options.optional,
@@ -222,8 +234,8 @@ const printFailure = (
   nextActions: readonly NextAction[] = [],
 ) => Console.log(json(failure(command, errorMessage(error), code, fix, nextActions)))
 
-// Reads exit non-zero on failure so shell watches fail closed; the envelope carries the typed code.
-const printReadFailure = (command: string, error: unknown, code: string, fix: string) =>
+// CI commands exit non-zero on failure so shell watches fail closed; the envelope carries the typed code.
+const printCiFailure = (command: string, error: unknown, code: string, fix: string) =>
   Effect.gen(function* () {
     process.exitCode = 1
     yield* printFailure(command, error, error instanceof CiReadError ? error.code : code, fix)
@@ -1459,7 +1471,7 @@ export const checksCmd = Command.make("checks", { repo: repoArg, sha: checksShaA
     ])
   }).pipe(
     Effect.catchAll((error) =>
-      printReadFailure(
+      printCiFailure(
         `checks ${repo} ${sha}`,
         error,
         "CHECKS_FAILED",
@@ -1496,7 +1508,7 @@ export const prStatusCmd = Command.make("pr-status", { repo: repoArg, number: is
     ])
   }).pipe(
     Effect.catchAll((error) =>
-      printReadFailure(
+      printCiFailure(
         `pr-status ${repo} ${number}`,
         error,
         "PR_STATUS_FAILED",
@@ -1529,7 +1541,7 @@ export const runLogCmd = Command.make("run-log", { repo: repoArg, jobId: jobIdAr
     )
   }).pipe(
     Effect.catchAll((error) =>
-      printReadFailure(
+      printCiFailure(
         `run-log ${repo} ${jobId}`,
         error,
         "RUN_LOG_FAILED",
@@ -1540,6 +1552,52 @@ export const runLogCmd = Command.make("run-log", { repo: repoArg, jobId: jobIdAr
     ),
   ),
 ).pipe(Command.withDescription("Read a GitHub Actions job log as ShitRat; needs Actions: read on the app"))
+
+export const rerunCmd = Command.make(
+  "rerun",
+  { repo: repoArg, runId: runIdArg, failed: failedJobsOption, dryRun: rerunDryRunOption },
+  ({ repo, runId, failed, dryRun }) =>
+    Effect.gen(function* () {
+      const repoRef = parseRepo(repo)
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const mode = failed ? "failed" : "all"
+      const rerun = yield* Effect.tryPromise({
+        try: () => rerunWorkflowRun(octokit, { owner: repoRef.owner, repo: repoRef.repo }, runId, mode, dryRun),
+        catch: toError,
+      })
+      const params = { repo: { value: repoRef.fullName, required: true }, "run-id": { value: runId, required: true } }
+      yield* printSuccess(
+        `rerun ${repoRef.fullName} ${runId}${failed ? " --failed" : ""}`,
+        {
+          repo: repoRef.fullName,
+          ...rerun,
+          dry_run: dryRun,
+          github_write: rerun.changed,
+          ...(dryRun ? {} : { actor: "shitratgit[bot]", installation_id: token.installationId }),
+        },
+        dryRun
+          ? [{ command: `rerun <repo> <run-id>${failed ? " --failed" : ""}`, description: "Rerun it as ShitRat", params }]
+          : [
+              {
+                command: "checks <repo> <sha>",
+                description: "Watch the rerun's checks on the run's head sha",
+                params: { repo: { value: repoRef.fullName, required: true }, sha: { value: rerun.after.head_sha, required: true } },
+              },
+            ],
+      )
+    }).pipe(
+      Effect.catchAll((error) =>
+        printCiFailure(
+          `rerun ${repo} ${runId}`,
+          error,
+          "RERUN_FAILED",
+          error instanceof CiReadError && error.code === "CONFLICT"
+            ? "Wait for the run to finish, then rerun it."
+            : "Verify the run id belongs to the repository, the run is under 30 days old, and the shitratgit app has Actions: write.",
+        ),
+      ),
+    ),
+).pipe(Command.withDescription("Rerun a GitHub Actions workflow run, or only its failed jobs, as ShitRat"))
 
 export const editPrCmd = Command.make(
   "edit-pr",

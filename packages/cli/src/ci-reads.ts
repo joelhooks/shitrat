@@ -5,7 +5,7 @@ interface RepoRef {
   repo: string
 }
 
-export type CiReadErrorCode = "NOT_FOUND" | "PERMISSION_DENIED" | "RATE_LIMITED" | "INVALID_INPUT" | "GITHUB_ERROR"
+export type CiReadErrorCode = "NOT_FOUND" | "PERMISSION_DENIED" | "RATE_LIMITED" | "CONFLICT" | "INVALID_INPUT" | "GITHUB_ERROR"
 
 export class CiReadError extends Error {
   constructor(
@@ -34,8 +34,16 @@ const isRateLimited = (error: unknown): boolean => {
   return headerOf(error, "x-ratelimit-remaining") === "0" || /rate limit/i.test(error instanceof Error ? error.message : "")
 }
 
-// One read, one translation: callers say what a 404 and a 403 mean for the thing they asked for.
-const translate = (error: unknown, meaning: { notFound: string; forbidden: string }): CiReadError => {
+interface Meaning {
+  notFound: string
+  forbidden: string
+  conflict?: string
+  // GitHub answers an unknown sha with 422 "No commit found for SHA" rather than 404.
+  unknownShaIs422?: boolean
+}
+
+// One call, one translation: callers say what a 404, 403 and 409 mean for the thing they asked for.
+const translate = (error: unknown, meaning: Meaning): CiReadError => {
   if (error instanceof CiReadError) return error
   const status = statusOf(error)
   const detail = error instanceof Error ? error.message : String(error)
@@ -44,13 +52,13 @@ const translate = (error: unknown, meaning: { notFound: string; forbidden: strin
     const until = reset ? ` until ${new Date(Number(reset) * 1000).toISOString()}` : ""
     return new CiReadError("RATE_LIMITED", `GitHub rate limit reached for the shitratgit app${until}: ${detail}`, status)
   }
-  // GitHub answers an unknown sha with 422 "No commit found for SHA" rather than 404.
-  if (status === 404 || status === 422) return new CiReadError("NOT_FOUND", meaning.notFound, status)
+  if (status === 404 || (status === 422 && meaning.unknownShaIs422)) return new CiReadError("NOT_FOUND", meaning.notFound, status)
   if (status === 403) return new CiReadError("PERMISSION_DENIED", `${meaning.forbidden} (GitHub: ${detail})`, status)
+  if (status === 409 && meaning.conflict) return new CiReadError("CONFLICT", `${meaning.conflict} (GitHub: ${detail})`, status)
   return new CiReadError("GITHUB_ERROR", detail, status)
 }
 
-const read = async <T>(run: () => Promise<T>, meaning: { notFound: string; forbidden: string }): Promise<T> => {
+const call = async <T>(run: () => Promise<T>, meaning: Meaning): Promise<T> => {
   try {
     return await run()
   } catch (error) {
@@ -118,19 +126,20 @@ export const readChecks = async (octokit: GitHubOctokit, ref: RepoRef, sha: stri
   const meaning = {
     notFound: `${input} is not a commit, branch or tag in ${ref.owner}/${ref.repo}, or the shitratgit app cannot see the repository.`,
     forbidden: `Reading checks needs Checks: read and Commit statuses: read on the shitratgit app`,
+    unknownShaIs422: true,
   }
-  const runs = await read(
+  const runs = await call(
     () => octokit.paginate(octokit.rest.checks.listForRef, { owner: ref.owner, repo: ref.repo, ref: input, per_page: 100 }),
     meaning,
   )
   // The combined status carries url, so octokit.paginate cannot flatten it; walk the pages by hand.
-  const first = await read(
+  const first = await call(
     () => octokit.rest.repos.getCombinedStatusForRef({ owner: ref.owner, repo: ref.repo, ref: input, per_page: 100, page: 1 }),
     meaning,
   )
   const statuses = [...first.data.statuses]
   for (let page = 2; statuses.length < first.data.total_count; page += 1) {
-    const next = await read(
+    const next = await call(
       () => octokit.rest.repos.getCombinedStatusForRef({ owner: ref.owner, repo: ref.repo, ref: input, per_page: 100, page }),
       meaning,
     )
@@ -166,7 +175,7 @@ export const readChecks = async (octokit: GitHubOctokit, ref: RepoRef, sha: stri
 }
 
 export const readPullRequestStatus = async (octokit: GitHubOctokit, ref: RepoRef, number: number) => {
-  const pull = await read(() => octokit.rest.pulls.get({ owner: ref.owner, repo: ref.repo, pull_number: number }), {
+  const pull = await call(() => octokit.rest.pulls.get({ owner: ref.owner, repo: ref.repo, pull_number: number }), {
     notFound: `Pull request #${number} does not exist in ${ref.owner}/${ref.repo}, or the shitratgit app cannot see the repository.`,
     forbidden: `Reading a pull request needs Pull requests: read on the shitratgit app`,
   })
@@ -209,9 +218,9 @@ export const readJobLog = async (octokit: GitHubOctokit, ref: RepoRef, jobId: nu
     notFound: `Job ${jobId} does not exist in ${ref.owner}/${ref.repo}, or its logs have expired.`,
     forbidden: ACTIONS_READ_MISSING,
   }
-  const job = await read(() => octokit.rest.actions.getJobForWorkflowRun({ owner: ref.owner, repo: ref.repo, job_id: jobId }), meaning)
+  const job = await call(() => octokit.rest.actions.getJobForWorkflowRun({ owner: ref.owner, repo: ref.repo, job_id: jobId }), meaning)
   // GitHub answers with a 302 to a short-lived download URL; fetch follows it.
-  const log = await read(
+  const log = await call(
     () => octokit.rest.actions.downloadJobLogsForWorkflowRun({ owner: ref.owner, repo: ref.repo, job_id: jobId }),
     meaning,
   )
@@ -235,4 +244,39 @@ export const readJobLog = async (octokit: GitHubOctokit, ref: RepoRef, jobId: nu
     truncated: kept.length < lines.length,
     log: kept.join("\n"),
   }
+}
+
+type WorkflowRun = Awaited<ReturnType<GitHubOctokit["rest"]["actions"]["getWorkflowRun"]>>["data"]
+
+const runSummary = (run: WorkflowRun) => ({
+  run_id: run.id,
+  name: run.name ?? null,
+  status: run.status,
+  conclusion: run.conclusion,
+  run_attempt: run.run_attempt ?? null,
+  head_sha: run.head_sha,
+  head_branch: run.head_branch,
+  html_url: run.html_url,
+})
+
+export type RerunMode = "all" | "failed"
+
+export const rerunWorkflowRun = async (octokit: GitHubOctokit, ref: RepoRef, runId: number, mode: RerunMode, dryRun: boolean) => {
+  if (!Number.isInteger(runId) || runId <= 0) throw new CiReadError("INVALID_INPUT", `${runId} is not a workflow run id.`)
+  const meaning: Meaning = {
+    notFound: `Workflow run ${runId} does not exist in ${ref.owner}/${ref.repo}.`,
+    forbidden: "GitHub refused the rerun: it needs Actions: write on the shitratgit app, and GitHub refuses runs older than 30 days",
+    conflict: `Workflow run ${runId} cannot be rerun now; it is probably still running or already re-running`,
+  }
+  const before = runSummary((await call(() => octokit.rest.actions.getWorkflowRun({ owner: ref.owner, repo: ref.repo, run_id: runId }), meaning)).data)
+  const base = { mode, before }
+  if (dryRun) return { ...base, changed: false, after: before }
+  const params = { owner: ref.owner, repo: ref.repo, run_id: runId }
+  const accepted = await call(
+    () => (mode === "failed" ? octokit.rest.actions.reRunWorkflowFailedJobs(params) : octokit.rest.actions.reRunWorkflow(params)),
+    meaning,
+  )
+  // Report the run as GitHub reads back after accepting, not as we hope it looks.
+  const after = runSummary((await call(() => octokit.rest.actions.getWorkflowRun(params), meaning)).data)
+  return { ...base, changed: true, github_status: accepted.status, after }
 }

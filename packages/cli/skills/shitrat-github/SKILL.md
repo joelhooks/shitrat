@@ -25,6 +25,7 @@ shitrat set-status badass-courses/drovr <sha> --state failure --context gavel/ho
 shitrat checks badass-courses/drovr <sha>
 shitrat pr-status badass-courses/drovr 867
 shitrat run-log badass-courses/drovr <job-id> --tail 300
+shitrat rerun badass-courses/drovr <run-id> --failed --dry-run
 shitrat merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch"
 shitrat push joelhooks/shitrat-cli --repo-dir /path/to/checkout
 shitrat commit-file joelhooks/shitrat-cli --branch main --message "docs: update notes" --file README.md
@@ -51,7 +52,7 @@ If the pi extension is loaded, prefer the tools:
 - Use `shitrat ready-pr` instead of `gh pr ready` to take a pull request out of draft.
 - On a branch with a merge queue, `merge-pr` fails with `MERGE_QUEUE_REQUIRED`; use `shitrat enqueue-pr`, which queues the head it read (`expectedHeadOid`) and reports the queue position and state. The queue's ruleset decides the merge method.
 - To hold a pull request as ShitRat, use `shitrat label --add` (the repo's hold label, e.g. `NO MERGE`), `shitrat set-status --state failure` on its head sha, or `shitrat convert-to-draft`, which also drops it from the merge queue. `label --add` refuses a label the repo lacks, so a typo cannot mint a new label.
-- Watch CI with `shitrat checks`, `shitrat pr-status` and `shitrat run-log`, not unauthenticated curl: they spend the app's 5,000 requests an hour instead of the 60 an IP shares. They exit 1 on a failed read, so shell watches fail closed; branch on `error.code`. For a GitHub Actions check, the check run id is the job id `run-log` takes. `run-log` needs Actions: read on the app; never fall back to Joel's token when it says so.
+- Watch CI with `shitrat checks`, `shitrat pr-status` and `shitrat run-log`, not unauthenticated curl: they spend the app's 5,000 requests an hour instead of the 60 an IP shares. They exit 1 on a failed read, so shell watches fail closed; branch on `error.code`. For a GitHub Actions check, the check run id is the job id `run-log` takes. `run-log` needs Actions: read on the app; never fall back to Joel's token when it says so. Use `shitrat rerun <repo> <run-id> [--failed]` instead of `gh run rerun`; `run-log` reports the `run_id`. A 409 `CONFLICT` means the run is still going.
 - Use `shitrat status <owner/repo>` first when repo access is uncertain.
 - Use `--body-file` for non-trivial Markdown so shell quoting does not mangle review text.
 - Use `--dry-run` before writing unless Joel explicitly asked to commit/merge as ShitRat.
