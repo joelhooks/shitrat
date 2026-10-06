@@ -19,6 +19,7 @@ import {
   resolvePushPlan,
   ShitRatPushError,
 } from "../git-push.js"
+import { attestPushedSha, withAttest } from "../attest.js"
 import { CiReadError, isFailingRun, readChecks, readJobLog, readPullRequestStatus, rerunWorkflowRun } from "../ci-reads.js"
 import { labelIssue, setCommitStatus } from "../labels-statuses.js"
 import { convertPullRequestToDraft, enqueuePullRequest, isMergeQueueRequired, readyPullRequest } from "../merge-queue.js"
@@ -990,6 +991,8 @@ export const createPrCmd = Command.make(
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
       })
 
+      const attest = yield* Effect.promise(() => attestPushedSha(repoRef.fullName, pull.data.head.sha))
+
       yield* printSuccess(
         command,
         {
@@ -1004,6 +1007,7 @@ export const createPrCmd = Command.make(
           author: pull.data.user?.login,
           actor: "shitratgit[bot]",
           installation_id: token.installationId,
+          ...withAttest(attest),
         },
         [
           {
@@ -2125,6 +2129,7 @@ export const pushCmd = Command.make(
         try: () => pushWithGit(repository, token.token, dryRun),
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
       })
+      const attest = dryRun ? undefined : yield* Effect.promise(() => attestPushedSha(repoRef.fullName, plan.newSha))
 
       yield* printSuccess(
         command,
@@ -2138,6 +2143,7 @@ export const pushCmd = Command.make(
           ...(dryRun
             ? { note: "git push --dry-run succeeded; no remote ref was changed." }
             : {}),
+          ...withAttest(attest),
         },
         [statusAction],
       )
