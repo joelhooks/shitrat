@@ -261,7 +261,23 @@ const runSummary = (run: WorkflowRun) => ({
 
 export type RerunMode = "all" | "failed"
 
-export const rerunWorkflowRun = async (octokit: GitHubOctokit, ref: RepoRef, runId: number, mode: RerunMode, dryRun: boolean) => {
+export interface RerunPolling {
+  reads: number
+  intervalMs: number
+  sleep: (ms: number) => Promise<void>
+}
+
+// GitHub bumps run_attempt a few seconds after it accepts a rerun: read about every 2 s for about 10 s.
+const DEFAULT_POLLING: RerunPolling = { reads: 5, intervalMs: 2000, sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }
+
+export const rerunWorkflowRun = async (
+  octokit: GitHubOctokit,
+  ref: RepoRef,
+  runId: number,
+  mode: RerunMode,
+  dryRun: boolean,
+  polling: RerunPolling = DEFAULT_POLLING,
+) => {
   if (!Number.isInteger(runId) || runId <= 0) throw new CiReadError("INVALID_INPUT", `${runId} is not a workflow run id.`)
   const meaning: Meaning = {
     notFound: `Workflow run ${runId} does not exist in ${ref.owner}/${ref.repo}.`,
@@ -277,6 +293,14 @@ export const rerunWorkflowRun = async (octokit: GitHubOctokit, ref: RepoRef, run
     meaning,
   )
   // Report the run as GitHub reads back after accepting, not as we hope it looks.
-  const after = runSummary((await call(() => octokit.rest.actions.getWorkflowRun(params), meaning)).data)
-  return { ...base, changed: true, github_status: accepted.status, after }
+  let after = before
+  let reads = 0
+  let confirmed = false
+  while (reads < polling.reads && !confirmed) {
+    if (reads > 0) await polling.sleep(polling.intervalMs)
+    after = runSummary((await call(() => octokit.rest.actions.getWorkflowRun(params), meaning)).data)
+    reads += 1
+    confirmed = after.run_attempt !== null && before.run_attempt !== null && after.run_attempt > before.run_attempt
+  }
+  return { ...base, changed: true, github_status: accepted.status, attempt_confirmed: confirmed, readback_reads: reads, after }
 }
