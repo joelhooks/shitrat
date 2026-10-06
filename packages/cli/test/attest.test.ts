@@ -48,8 +48,13 @@ describe("attest after push", () => {
   })
 
   test("a hung fleet-compute is killed at the timeout and recorded", async () => {
-    const fake = await fakeFleetCompute("sleep 5")
-    const attest = await attestPushedSha("o/r", SHA, { pathEnv: fake.pathEnv, timeoutMs: 100 })
+    // A child that outlives the killed wrapper keeps the pipes open, as on Linux CI.
+    const fake = await fakeFleetCompute(`sleep 30 & echo $! > "$(dirname "$0")/child"; wait`)
+    const started = Date.now()
+    const attest = await attestPushedSha("o/r", SHA, { pathEnv: fake.pathEnv, timeoutMs: 1000 })
+    expect(Date.now() - started).toBeLessThan(3000)
+    const child = Number(await readFile(join(fake.pathEnv.split(":")[0]!, "child"), "utf8"))
+    process.kill(child)
     expect(attest).toMatchObject({ stderr: expect.stringContaining("killed") })
     expect(attest && "exit" in attest && attest.exit).not.toBe(0)
   })
