@@ -81,6 +81,13 @@ bun run src/cli.ts label badass-courses/drovr 886 --add "NO MERGE" --dry-run
 # Create a commit status. A short sha is resolved to the full sha, or refused if GitHub cannot.
 bun run src/cli.ts set-status badass-courses/drovr <sha> --state failure --context gavel/hold --description "Held by review" --dry-run
 
+# CI reads on the app's 5,000/hour budget instead of unauthenticated curl. Reads print JSON
+# and exit 1 on failure with a typed error.code (NOT_FOUND, PERMISSION_DENIED, RATE_LIMITED).
+bun run src/cli.ts checks badass-courses/drovr <sha>
+bun run src/cli.ts pr-status badass-courses/drovr 867
+# Needs Actions: read on the app; without it, PERMISSION_DENIED. --tail 0 returns the whole log.
+bun run src/cli.ts run-log badass-courses/drovr <job-id> --tail 300
+
 # Preview a branch merge as shitratgit[bot]
 bun run src/cli.ts merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch" --dry-run
 

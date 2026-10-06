@@ -19,6 +19,7 @@ import {
   resolvePushPlan,
   ShitRatPushError,
 } from "../git-push.js"
+import { CiReadError, isFailingRun, readChecks, readJobLog, readPullRequestStatus } from "../ci-reads.js"
 import { labelIssue, setCommitStatus } from "../labels-statuses.js"
 import { convertPullRequestToDraft, enqueuePullRequest, isMergeQueueRequired, readyPullRequest } from "../merge-queue.js"
 import { errorMessage, failure, json, success, type NextAction } from "../response.js"
@@ -149,6 +150,19 @@ const statusDryRunOption = Options.boolean("dry-run").pipe(
   Options.withDescription("Resolve the sha and read the current status for this context, without writing"),
 )
 
+const checksShaArg = Args.text({ name: "sha" }).pipe(
+  Args.withDescription("Commit sha, or a branch or tag to read its head commit"),
+)
+
+const jobIdArg = Args.integer({ name: "job-id" }).pipe(
+  Args.withDescription("GitHub Actions job id; for Actions checks this is the check run id"),
+)
+
+const tailOption = Options.integer("tail").pipe(
+  Options.withDescription("Return the last N log lines; 0 returns the whole log"),
+  Options.withDefault(300),
+)
+
 const commitTitleOption = Options.text("commit-title").pipe(
   Options.withDescription("Optional merge commit title"),
   Options.optional,
@@ -207,6 +221,15 @@ const printFailure = (
   fix: string,
   nextActions: readonly NextAction[] = [],
 ) => Console.log(json(failure(command, errorMessage(error), code, fix, nextActions)))
+
+// Reads exit non-zero on failure so shell watches fail closed; the envelope carries the typed code.
+const printReadFailure = (command: string, error: unknown, code: string, fix: string) =>
+  Effect.gen(function* () {
+    process.exitCode = 1
+    yield* printFailure(command, error, error instanceof CiReadError ? error.code : code, fix)
+  })
+
+const toError = (error: unknown): Error => (error instanceof Error ? error : new Error(String(error)))
 
 const optionToUndefined = <A>(option: Option.Option<A>): A | undefined =>
   Option.isSome(option) ? option.value : undefined
@@ -1403,6 +1426,120 @@ export const setStatusCmd = Command.make(
       ),
     ),
 ).pipe(Command.withDescription("Create a commit status on a sha as ShitRat"))
+
+const runLogActions = (repo: string, runs: readonly { id: number; name: string; app: string | null }[]): NextAction[] =>
+  runs
+    .filter((run) => run.app === "github-actions")
+    .map((run) => ({
+      command: "run-log <repo> <job-id>",
+      description: `Read the log of the failing job "${run.name}"`,
+      params: { repo: { value: repo, required: true }, "job-id": { value: run.id, required: true } },
+    }))
+
+export const checksCmd = Command.make("checks", { repo: repoArg, sha: checksShaArg }, ({ repo, sha }) =>
+  Effect.gen(function* () {
+    const repoRef = parseRepo(repo)
+    const { octokit } = yield* createRepoOctokit(repoRef)
+    const checks = yield* Effect.tryPromise({
+      try: () => readChecks(octokit, { owner: repoRef.owner, repo: repoRef.repo }, sha),
+      catch: toError,
+    })
+    const failingRuns = checks.check_runs.filter(isFailingRun)
+    yield* printSuccess(`checks ${repoRef.fullName} ${sha}`, { repo: repoRef.fullName, ...checks }, [
+      ...runLogActions(repoRef.fullName, failingRuns),
+      ...(checks.summary.verdict === "pending"
+        ? [
+            {
+              command: "checks <repo> <sha>",
+              description: "Read the checks again once the pending ones finish",
+              params: { repo: { value: repoRef.fullName, required: true }, sha: { value: checks.sha, required: true } },
+            },
+          ]
+        : []),
+    ])
+  }).pipe(
+    Effect.catchAll((error) =>
+      printReadFailure(
+        `checks ${repo} ${sha}`,
+        error,
+        "CHECKS_FAILED",
+        "Verify the sha exists in the repository and the shitratgit app has Checks: read and Commit statuses: read.",
+      ),
+    ),
+  ),
+).pipe(Command.withDescription("Read every check run and the combined commit status for a sha as ShitRat"))
+
+export const prStatusCmd = Command.make("pr-status", { repo: repoArg, number: issueNumberArg }, ({ repo, number }) =>
+  Effect.gen(function* () {
+    const repoRef = parseRepo(repo)
+    const { octokit } = yield* createRepoOctokit(repoRef)
+    const status = yield* Effect.tryPromise({
+      try: () => readPullRequestStatus(octokit, { owner: repoRef.owner, repo: repoRef.repo }, number),
+      catch: toError,
+    })
+    yield* printSuccess(`pr-status ${repoRef.fullName} ${number}`, { repo: repoRef.fullName, ...status }, [
+      {
+        command: "checks <repo> <sha>",
+        description: "List every check run and commit status on the head sha",
+        params: { repo: { value: repoRef.fullName, required: true }, sha: { value: status.head.sha, required: true } },
+      },
+      ...runLogActions(repoRef.fullName, status.checks.failing_runs),
+      ...(status.mergeable === null
+        ? [
+            {
+              command: "pr-status <repo> <number>",
+              description: "GitHub is still computing mergeability; read again in a few seconds",
+              params: { repo: { value: repoRef.fullName, required: true }, number: { value: number, required: true } },
+            },
+          ]
+        : []),
+    ])
+  }).pipe(
+    Effect.catchAll((error) =>
+      printReadFailure(
+        `pr-status ${repo} ${number}`,
+        error,
+        "PR_STATUS_FAILED",
+        "Verify the pull request exists and the shitratgit app has Pull requests: read and Checks: read.",
+      ),
+    ),
+  ),
+).pipe(Command.withDescription("Read a pull request's mergeability, head sha, draft state, labels and checks summary as ShitRat"))
+
+export const runLogCmd = Command.make("run-log", { repo: repoArg, jobId: jobIdArg, tail: tailOption }, ({ repo, jobId, tail }) =>
+  Effect.gen(function* () {
+    const repoRef = parseRepo(repo)
+    const { octokit } = yield* createRepoOctokit(repoRef)
+    const log = yield* Effect.tryPromise({
+      try: () => readJobLog(octokit, { owner: repoRef.owner, repo: repoRef.repo }, jobId, tail),
+      catch: toError,
+    })
+    yield* printSuccess(
+      `run-log ${repoRef.fullName} ${jobId}`,
+      { repo: repoRef.fullName, ...log },
+      log.truncated
+        ? [
+            {
+              command: "run-log <repo> <job-id> --tail 0",
+              description: `Read the whole log (${log.total_lines} lines)`,
+              params: { repo: { value: repoRef.fullName, required: true }, "job-id": { value: jobId, required: true } },
+            },
+          ]
+        : [],
+    )
+  }).pipe(
+    Effect.catchAll((error) =>
+      printReadFailure(
+        `run-log ${repo} ${jobId}`,
+        error,
+        "RUN_LOG_FAILED",
+        error instanceof CiReadError && error.code === "PERMISSION_DENIED"
+          ? "Grant the shitratgit GitHub App Actions: read and accept the permission change on the installation. Do not fall back to a personal token."
+          : "Verify the job id belongs to the repository and its logs have not expired.",
+      ),
+    ),
+  ),
+).pipe(Command.withDescription("Read a GitHub Actions job log as ShitRat; needs Actions: read on the app"))
 
 export const editPrCmd = Command.make(
   "edit-pr",

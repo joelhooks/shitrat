@@ -20,6 +20,7 @@ import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import path from "node:path"
 import {
+  checksCmd,
   commitFileCmd,
   commitFilesCmd,
   commentCmd,
@@ -32,9 +33,11 @@ import {
   labelCmd,
   mergeCmd,
   mergePrCmd,
+  prStatusCmd,
   pushCmd,
   readyPrCmd,
   reviewCmd,
+  runLogCmd,
   setStatusCmd,
   statusCmd,
 } from "./commands/github.js"
@@ -77,6 +80,9 @@ const root = Command.make("shitrat", {}, () =>
               label: "shitrat label <owner/repo> <issue-or-pr-number> [--add <label>...] [--remove <label>...] [--dry-run]",
               set_status:
                 "shitrat set-status <owner/repo> <sha> --state pending|success|failure|error --context <name> --description <text> [--target-url <url>] [--dry-run]",
+              checks: "shitrat checks <owner/repo> <sha>",
+              pr_status: "shitrat pr-status <owner/repo> <pull-number>",
+              run_log: "shitrat run-log <owner/repo> <job-id> [--tail <lines>]",
               install:
                 "shitrat install pi|claude|codex-desktop --dry-run",
               update:
@@ -238,6 +244,22 @@ const root = Command.make("shitrat", {}, () =>
                 description: { required: true, description: "At most 140 characters" },
               },
             },
+            {
+              command: "pr-status <repo> <number>",
+              description: "Read a pull request's mergeability, head sha, labels and checks summary as ShitRat",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                number: { required: true, description: "PR number" },
+              },
+            },
+            {
+              command: "checks <repo> <sha>",
+              description: "Read every check run and the combined commit status for a sha as ShitRat",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                sha: { required: true, description: "Commit sha, branch or tag" },
+              },
+            },
           ],
         ),
       ),
@@ -259,6 +281,9 @@ const root = Command.make("shitrat", {}, () =>
     convertToDraftCmd,
     labelCmd,
     setStatusCmd,
+    checksCmd,
+    prStatusCmd,
+    runLogCmd,
     editPrCmd,
     commitFileCmd,
     commitFilesCmd,
