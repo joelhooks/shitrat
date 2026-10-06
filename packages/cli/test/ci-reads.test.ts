@@ -285,11 +285,17 @@ const workflowRun = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 })
 
-// GitHub after it accepts a rerun: the next read shows a queued second attempt.
-const rerunnable = (endpoint: "rerun" | "rerun-failed-jobs") => {
+// GitHub after it accepts a rerun: reads show the old attempt `lag` more times, then a queued second attempt.
+const rerunnable = (endpoint: "rerun" | "rerun-failed-jobs", lag = 0) => {
   let rerun = false
+  let staleReadsLeft = lag
+  const stale = () => {
+    staleReadsLeft -= 1
+    return { body: workflowRun({ status: "queued", conclusion: null }) }
+  }
   return github({
-    "GET /repos/o/r/actions/runs/5": () => ({ body: rerun ? workflowRun({ status: "queued", conclusion: null, run_attempt: 2 }) : workflowRun() }),
+    "GET /repos/o/r/actions/runs/5": () =>
+      !rerun ? { body: workflowRun() } : staleReadsLeft > 0 ? stale() : { body: workflowRun({ status: "queued", conclusion: null, run_attempt: 2 }) },
     [`POST /repos/o/r/actions/runs/5/${endpoint}`]: () => {
       rerun = true
       return { status: 201, body: {} }
@@ -297,15 +303,22 @@ const rerunnable = (endpoint: "rerun" | "rerun-failed-jobs") => {
   })
 }
 
+const noWait = () => {
+  const sleeps: number[] = []
+  return { polling: { reads: 5, intervalMs: 2000, sleep: async (ms: number) => void sleeps.push(ms) }, sleeps }
+}
+
 describe("rerun", () => {
   test("reruns the whole run and reports the attempt GitHub reads back", async () => {
     const gh = rerunnable("rerun")
-    const result = await rerunWorkflowRun(gh.octokit, ref, 5, "all", false)
+    const result = await rerunWorkflowRun(gh.octokit, ref, 5, "all", false, noWait().polling)
     expect(gh.requests).toEqual(["GET /repos/o/r/actions/runs/5", "POST /repos/o/r/actions/runs/5/rerun", "GET /repos/o/r/actions/runs/5"])
     expect(result).toMatchObject({
       mode: "all",
       changed: true,
       github_status: 201,
+      attempt_confirmed: true,
+      readback_reads: 1,
       before: { run_id: 5, status: "completed", conclusion: "failure", run_attempt: 1 },
       after: { status: "queued", conclusion: null, run_attempt: 2 },
     })
@@ -313,9 +326,26 @@ describe("rerun", () => {
 
   test("--failed uses the rerun-failed-jobs endpoint", async () => {
     const gh = rerunnable("rerun-failed-jobs")
-    const result = await rerunWorkflowRun(gh.octokit, ref, 5, "failed", false)
+    const result = await rerunWorkflowRun(gh.octokit, ref, 5, "failed", false, noWait().polling)
     expect(gh.requests).toContain("POST /repos/o/r/actions/runs/5/rerun-failed-jobs")
     expect(result).toMatchObject({ mode: "failed", changed: true, after: { run_attempt: 2 } })
+  })
+
+  test("keeps reading until GitHub shows the new attempt: confirmed on the third read", async () => {
+    const gh = rerunnable("rerun-failed-jobs", 2)
+    const wait = noWait()
+    const result = await rerunWorkflowRun(gh.octokit, ref, 5, "failed", false, wait.polling)
+    expect(result).toMatchObject({ attempt_confirmed: true, readback_reads: 3, after: { run_attempt: 2 } })
+    expect(wait.sleeps).toEqual([2000, 2000])
+  })
+
+  test("never reports a stale attempt as confirmed: unconfirmed at the timeout, with the last attempt seen", async () => {
+    const gh = rerunnable("rerun-failed-jobs", 99)
+    const wait = noWait()
+    const result = await rerunWorkflowRun(gh.octokit, ref, 5, "failed", false, wait.polling)
+    expect(result).toMatchObject({ changed: true, github_status: 201, attempt_confirmed: false, readback_reads: 5, after: { status: "queued", run_attempt: 1 } })
+    expect(wait.sleeps).toEqual([2000, 2000, 2000, 2000])
+    expect(gh.requests.filter((request) => request === "GET /repos/o/r/actions/runs/5")).toHaveLength(6)
   })
 
   test("a dry run reads the run and writes nothing", async () => {

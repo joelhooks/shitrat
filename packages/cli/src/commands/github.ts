@@ -1578,6 +1578,15 @@ export const rerunCmd = Command.make(
         dryRun
           ? [{ command: `rerun <repo> <run-id>${failed ? " --failed" : ""}`, description: "Rerun it as ShitRat", params }]
           : [
+              ...("attempt_confirmed" in rerun && !rerun.attempt_confirmed
+                ? [
+                    {
+                      command: "rerun <repo> <run-id> --dry-run",
+                      description: "GitHub accepted the rerun but has not shown a new run_attempt yet; read the run again",
+                      params,
+                    },
+                  ]
+                : []),
               {
                 command: "checks <repo> <sha>",
                 description: "Watch the rerun's checks on the run's head sha",
