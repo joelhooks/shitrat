@@ -13,7 +13,7 @@
     "check": "tsgo --noEmit --pretty false",
     "test": "bun test ./test/response.test.ts ./test/github-pr-edits.test.ts ./test/merge-queue.test.ts ./test/labels-statuses.test.ts ./test/ci-reads.test.ts ./test/x-article.test.ts ./test/attest.test.ts",
     "build": "tsgo -p tsconfig.build.json && bun build src/cli.ts --target bun --outdir dist && chmod +x dist/cli.js",
-    "build:binary": "bun build src/cli.ts --compile --outfile dist/shitrat",
+    "build:binary": "bun build src/cli.ts --compile --define \"SHITRAT_BUILD_SHA='$(git rev-parse HEAD)'\" --outfile dist/shitrat",
     "doctor": "bun run src/cli.ts doctor --dry-run",
     "format": "oxfmt --check . || true",
     "smoke": "bun run src/cli.ts status skillrecordings/migrate-egghead"
