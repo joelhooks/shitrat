@@ -1,6 +1,6 @@
 import { Octokit } from "@octokit/rest"
 import { describe, expect, test } from "bun:test"
-import { ACTIONS_READ_MISSING, CiReadError, readChecks, readJobLog, readPullRequestStatus } from "../src/ci-reads.js"
+import { ACTIONS_READ_MISSING, CiReadError, readChecks, readJobLog, readPullRequestStatus, rerunWorkflowRun } from "../src/ci-reads.js"
 
 const ref = { owner: "o", repo: "r" }
 const SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -9,13 +9,14 @@ const API = "https://api.github.com"
 type Reply = { status?: number; body?: unknown; text?: string; headers?: Record<string, string> }
 
 // A GitHub stand-in at the fetch boundary: routes match method, path and the query octokit sends.
-const github = (routes: Record<string, Reply>) => {
+const github = (routes: Record<string, Reply | (() => Reply)>) => {
   const requests: string[] = []
   const fetch = async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url)
     const key = `${init?.method ?? "GET"} ${url.pathname}${url.search}`
     requests.push(key)
-    const reply = routes[key] ?? { status: 404, body: { message: "Not Found" } }
+    const route = routes[key]
+    const reply = (typeof route === "function" ? route() : route) ?? { status: 404, body: { message: "Not Found" } }
     const headers = { "x-ratelimit-remaining": "4999", ...reply.headers }
     const response =
       reply.text !== undefined
@@ -268,6 +269,90 @@ describe("run-log", () => {
   ])("refuses %s before calling GitHub", async (_name, jobId, tail) => {
     const gh = github({})
     await expect(readJobLog(gh.octokit, ref, jobId, tail)).rejects.toMatchObject({ code: "INVALID_INPUT" })
+    expect(gh.requests).toEqual([])
+  })
+})
+
+const workflowRun = (overrides: Record<string, unknown> = {}) => ({
+  id: 5,
+  name: "CI",
+  status: "completed",
+  conclusion: "failure",
+  run_attempt: 1,
+  head_sha: SHA,
+  head_branch: "main",
+  html_url: "https://github.com/o/r/actions/runs/5",
+  ...overrides,
+})
+
+// GitHub after it accepts a rerun: the next read shows a queued second attempt.
+const rerunnable = (endpoint: "rerun" | "rerun-failed-jobs") => {
+  let rerun = false
+  return github({
+    "GET /repos/o/r/actions/runs/5": () => ({ body: rerun ? workflowRun({ status: "queued", conclusion: null, run_attempt: 2 }) : workflowRun() }),
+    [`POST /repos/o/r/actions/runs/5/${endpoint}`]: () => {
+      rerun = true
+      return { status: 201, body: {} }
+    },
+  })
+}
+
+describe("rerun", () => {
+  test("reruns the whole run and reports the attempt GitHub reads back", async () => {
+    const gh = rerunnable("rerun")
+    const result = await rerunWorkflowRun(gh.octokit, ref, 5, "all", false)
+    expect(gh.requests).toEqual(["GET /repos/o/r/actions/runs/5", "POST /repos/o/r/actions/runs/5/rerun", "GET /repos/o/r/actions/runs/5"])
+    expect(result).toMatchObject({
+      mode: "all",
+      changed: true,
+      github_status: 201,
+      before: { run_id: 5, status: "completed", conclusion: "failure", run_attempt: 1 },
+      after: { status: "queued", conclusion: null, run_attempt: 2 },
+    })
+  })
+
+  test("--failed uses the rerun-failed-jobs endpoint", async () => {
+    const gh = rerunnable("rerun-failed-jobs")
+    const result = await rerunWorkflowRun(gh.octokit, ref, 5, "failed", false)
+    expect(gh.requests).toContain("POST /repos/o/r/actions/runs/5/rerun-failed-jobs")
+    expect(result).toMatchObject({ mode: "failed", changed: true, after: { run_attempt: 2 } })
+  })
+
+  test("a dry run reads the run and writes nothing", async () => {
+    const gh = rerunnable("rerun")
+    const result = await rerunWorkflowRun(gh.octokit, ref, 5, "all", true)
+    expect(gh.requests).toEqual(["GET /repos/o/r/actions/runs/5"])
+    expect(result).toMatchObject({ changed: false, after: { run_attempt: 1 } })
+  })
+
+  test("a refused rerun is PERMISSION_DENIED with GitHub's reason, not success", async () => {
+    const gh = github({
+      "GET /repos/o/r/actions/runs/5": { body: workflowRun() },
+      "POST /repos/o/r/actions/runs/5/rerun": { status: 403, body: { message: "Unable to re-run this workflow run because it was created over a month ago" } },
+    })
+    const error = await rerunWorkflowRun(gh.octokit, ref, 5, "all", false).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: "PERMISSION_DENIED", status: 403 })
+    expect((error as Error).message).toContain("created over a month ago")
+    expect(gh.requests).toEqual(["GET /repos/o/r/actions/runs/5", "POST /repos/o/r/actions/runs/5/rerun"])
+  })
+
+  test("a run that is still going is a typed CONFLICT", async () => {
+    const gh = github({
+      "GET /repos/o/r/actions/runs/5": { body: workflowRun({ status: "in_progress", conclusion: null }) },
+      "POST /repos/o/r/actions/runs/5/rerun-failed-jobs": { status: 409, body: { message: "This workflow is already running" } },
+    })
+    await expect(rerunWorkflowRun(gh.octokit, ref, 5, "failed", false)).rejects.toMatchObject({ code: "CONFLICT", status: 409 })
+  })
+
+  test("an unknown run is a typed NOT_FOUND and nothing is posted", async () => {
+    const gh = github({})
+    await expect(rerunWorkflowRun(gh.octokit, ref, 404, "all", false)).rejects.toMatchObject({ code: "NOT_FOUND" })
+    expect(gh.requests).toEqual(["GET /repos/o/r/actions/runs/404"])
+  })
+
+  test("refuses a non-positive run id before calling GitHub", async () => {
+    const gh = github({})
+    await expect(rerunWorkflowRun(gh.octokit, ref, 0, "all", false)).rejects.toMatchObject({ code: "INVALID_INPUT" })
     expect(gh.requests).toEqual([])
   })
 })

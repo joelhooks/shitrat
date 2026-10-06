@@ -36,6 +36,7 @@ import {
   prStatusCmd,
   pushCmd,
   readyPrCmd,
+  rerunCmd,
   reviewCmd,
   runLogCmd,
   setStatusCmd,
@@ -84,6 +85,7 @@ const root = Command.make("shitrat", {}, () =>
               checks: "shitrat checks <owner/repo> <sha>",
               pr_status: "shitrat pr-status <owner/repo> <pull-number>",
               run_log: "shitrat run-log <owner/repo> <job-id> [--tail <lines>]",
+              rerun: "shitrat rerun <owner/repo> <run-id> [--failed] [--dry-run]",
               install:
                 "shitrat install pi|claude|codex-desktop --dry-run",
               update:
@@ -290,6 +292,7 @@ const root = Command.make("shitrat", {}, () =>
     checksCmd,
     prStatusCmd,
     runLogCmd,
+    rerunCmd,
     editPrCmd,
     commitFileCmd,
     commitFilesCmd,
