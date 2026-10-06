@@ -41,16 +41,15 @@ export const attestPushedSha = async (repo: string, sha: string, options: Attest
 
     const proc = Bun.spawn([binary, "attest", "--github", repo, "--sha", sha], {
       stdin: "ignore",
-      stdout: "pipe",
+      stdout: "ignore",
       stderr: "pipe",
       env: { ...process.env, ...(options.pathEnv !== undefined ? { PATH: options.pathEnv } : {}) },
     })
-    const timer = setTimeout(() => proc.kill(), options.timeoutMs ?? 20_000)
-    const [, stderr, exit] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]).finally(() => clearTimeout(timer))
+    const timer = setTimeout(() => proc.kill("SIGKILL"), options.timeoutMs ?? 20_000)
+    const stderrText = new Response(proc.stderr).text()
+    // Wait on the process, not its pipes: a killed wrapper's children can hold the pipes open.
+    const exit = await proc.exited.finally(() => clearTimeout(timer))
+    const stderr = await Promise.race([stderrText, new Promise<string>((resolve) => setTimeout(() => resolve(""), 250))])
 
     if (exit === 0) return { exit: 0, status: "posted" }
     if (exit === 3) return undefined
