@@ -117,6 +117,7 @@ bun run src/cli.ts push joelhooks/shitrat-cli --repo-dir . --dry-run
 bun run src/cli.ts push joelhooks/shitrat-cli --repo-dir .
 # After a real push or create-pr, `fleet-compute attest` runs best-effort when it is on PATH.
 # Exit 3 (or FLEET_ATTEST=off) adds nothing; other outcomes appear as `attest` in the result. The push never fails on it.
+# Every attempt is appended to ~/.shitrat/log/attest.jsonl (ts, repo, sha, shitrat_build, exit, reason or stderr).
 
 # Preview opening a pull request as shitratgit[bot]
 bun run src/cli.ts create-pr joelhooks/shitrat-cli --title "docs: propose vision" --head shitrat/propose-vision --base main --body-file pr.md --dry-run

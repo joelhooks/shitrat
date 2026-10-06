@@ -991,7 +991,7 @@ export const createPrCmd = Command.make(
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
       })
 
-      const attest = yield* Effect.promise(() => attestPushedSha(repoRef.fullName, pull.data.head.sha))
+      const attest = yield* Effect.promise(() => attestPushedSha(repoRef.fullName, pull.data.head.sha, { command: "create-pr" }))
 
       yield* printSuccess(
         command,
@@ -2129,7 +2129,7 @@ export const pushCmd = Command.make(
         try: () => pushWithGit(repository, token.token, dryRun),
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
       })
-      const attest = dryRun ? undefined : yield* Effect.promise(() => attestPushedSha(repoRef.fullName, plan.newSha))
+      const attest = dryRun ? undefined : yield* Effect.promise(() => attestPushedSha(repoRef.fullName, plan.newSha, { command: "push" }))
 
       yield* printSuccess(
         command,
