@@ -21,6 +21,7 @@ import { homedir } from "node:os"
 import path from "node:path"
 import {
   checksCmd,
+  deleteBranchCmd,
   commitFileCmd,
   commitFilesCmd,
   commentCmd,
@@ -60,6 +61,7 @@ const root = Command.make("shitrat", {}, () =>
             commands: {
               installations: "shitrat installations",
               status: "shitrat status <owner/repo>",
+              delete_branch: "shitrat delete-branch [--dry-run] <owner/repo> <branch>",
               comment: "shitrat comment <owner/repo> <issue-or-pr-number> --body-file <path>",
               reply: "shitrat reply <owner/repo> <pull-number> <comment-id> --body-file <path>",
               edit_pr: "shitrat edit-pr <owner/repo> <pull-number> [--title <title>] [--body-file <path>] [--base <branch>] [--state open|closed]",
@@ -113,6 +115,14 @@ const root = Command.make("shitrat", {}, () =>
                   description: "Repository in owner/repo form",
                   value: "skillrecordings/migrate-egghead",
                 },
+              },
+            },
+            {
+              command: "delete-branch <repo> <branch> [--dry-run]",
+              description: "Delete a non-default, unprotected branch as ShitRat",
+              params: {
+                repo: { required: true, description: "Repository in owner/repo form" },
+                branch: { required: true, description: "Branch name" },
               },
             },
             {
@@ -277,6 +287,7 @@ const root = Command.make("shitrat", {}, () =>
   Command.withSubcommands([
     installationsCmd,
     statusCmd,
+    deleteBranchCmd,
     commentCmd,
     replyCmd,
     reviewCmd,

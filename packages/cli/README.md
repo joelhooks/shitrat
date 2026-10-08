@@ -91,6 +91,11 @@ bun run src/cli.ts run-log badass-courses/drovr <job-id> --tail 300
 # 403/404/409 come back as typed errors (PERMISSION_DENIED, NOT_FOUND, CONFLICT).
 bun run src/cli.ts rerun badass-courses/drovr <run-id> --failed --dry-run
 
+# Inspect a branch's default/protection status and SHA without deleting it
+bun run src/cli.ts delete-branch joelhooks/shitrat-cli feature-branch --dry-run
+# Delete only after the target is explicitly authorized; default and protected branches are refused
+bun run src/cli.ts delete-branch joelhooks/shitrat-cli feature-branch
+
 # Preview a branch merge as shitratgit[bot]
 bun run src/cli.ts merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch" --dry-run
 
@@ -165,7 +170,7 @@ More detail: [`docs/hunk-diff-viewer.md`](docs/hunk-diff-viewer.md)
 
 This repo includes:
 
-- `extensions/shitrat`: pi extension that registers `shitrat_status`, `shitrat_comment`, `shitrat_reply`, `shitrat_edit_pr`, `shitrat_review`, `shitrat_merge`, `shitrat_commit_file`, and `shitrat_commit_files` tools.
+- `extensions/shitrat`: pi extension that registers `shitrat_status`, `shitrat_delete_branch`, `shitrat_comment`, `shitrat_reply`, `shitrat_edit_pr`, `shitrat_review`, `shitrat_merge`, `shitrat_commit_file`, and `shitrat_commit_files` tools.
 - `skills/shitrat-github`: skill instructions for using ShitRat as the GitHub actor.
 - `skills/shitrat-x`: X Articles draft and publish through `shitrat x`.
 

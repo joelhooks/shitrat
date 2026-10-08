@@ -29,6 +29,10 @@ const repoArg = Args.text({ name: "repo" }).pipe(
   Args.withDescription("Repository in owner/repo form"),
 )
 
+const branchNameArg = Args.text({ name: "branch" }).pipe(
+  Args.withDescription("Branch to delete; cannot be the default or a protected branch"),
+)
+
 const issueNumberArg = Args.integer({ name: "number" }).pipe(
   Args.withDescription("Issue or pull request number"),
 )
@@ -110,6 +114,10 @@ const queueMethodOption = Options.choice("method", ["merge", "squash", "rebase"]
 
 const readDryRunOption = Options.boolean("dry-run").pipe(
   Options.withDescription("Read the pull request from GitHub and report what would change, without writing"),
+)
+
+const branchDeleteDryRunOption = Options.boolean("dry-run").pipe(
+  Options.withDescription("Read repository and branch protection state without deleting the branch"),
 )
 
 const addLabelOption = Options.text("add").pipe(
@@ -394,6 +402,88 @@ const normalizeGitRef = (value: string): string => {
   }
   if (trimmed.startsWith("heads/")) return validateBranchName(trimmed.slice("heads/".length))
   return validateBranchName(trimmed)
+}
+
+export type BranchDeletionRefusalReason = "default_branch" | "protected_branch"
+
+export type BranchDeletionPlan =
+  | { readonly allowed: true }
+  | { readonly allowed: false; readonly reason: BranchDeletionRefusalReason }
+
+export interface BranchDeletionClient {
+  readonly getRepository: () => Promise<{ readonly defaultBranch: string }>
+  readonly getBranch: (branch: string) => Promise<{ readonly sha: string; readonly isProtected: boolean }>
+  readonly deleteRef: (ref: string) => Promise<void>
+}
+
+export interface BranchDeletionReceipt {
+  readonly branch: string
+  readonly ref: string
+  readonly defaultBranch: string
+  readonly sha: string
+  readonly isProtected: boolean
+  readonly dryRun: boolean
+  readonly deleted: boolean
+}
+
+export class BranchDeletionRefusal extends Error {
+  constructor(
+    readonly reason: BranchDeletionRefusalReason,
+    branch: string,
+  ) {
+    super(
+      reason === "default_branch"
+        ? `Refusing to delete the repository default branch '${branch}'.`
+        : `Refusing to delete protected branch '${branch}'.`,
+    )
+    this.name = "BranchDeletionRefusal"
+  }
+}
+
+export const planBranchDeletion = (input: {
+  readonly branch: string
+  readonly defaultBranch: string
+  readonly isProtected: boolean
+}): BranchDeletionPlan => {
+  if (input.branch === input.defaultBranch) return { allowed: false, reason: "default_branch" }
+  if (input.isProtected) return { allowed: false, reason: "protected_branch" }
+  return { allowed: true }
+}
+
+export const deleteBranchSafely = async (
+  client: BranchDeletionClient,
+  branch: string,
+  dryRun: boolean,
+): Promise<BranchDeletionReceipt> => {
+  const repository = await client.getRepository()
+  const defaultBranchPlan = planBranchDeletion({
+    branch,
+    defaultBranch: repository.defaultBranch,
+    isProtected: false,
+  })
+  if (!defaultBranchPlan.allowed) {
+    throw new BranchDeletionRefusal(defaultBranchPlan.reason, branch)
+  }
+
+  const target = await client.getBranch(branch)
+  const plan = planBranchDeletion({
+    branch,
+    defaultBranch: repository.defaultBranch,
+    isProtected: target.isProtected,
+  })
+  if (!plan.allowed) throw new BranchDeletionRefusal(plan.reason, branch)
+
+  if (!dryRun) await client.deleteRef(`heads/${branch}`)
+
+  return {
+    branch,
+    ref: `refs/heads/${branch}`,
+    defaultBranch: repository.defaultBranch,
+    sha: target.sha,
+    isProtected: target.isProtected,
+    dryRun,
+    deleted: !dryRun,
+  }
 }
 
 interface BranchHead {
@@ -739,6 +829,14 @@ export const statusCmd = Command.make("status", { repo: repoArg }, ({ repo }) =>
       },
       [
         {
+          command: "delete-branch <repo> <branch> --dry-run",
+          description: "Read the default branch and protections before deleting a branch",
+          params: {
+            repo: { value: repoRef.fullName, required: true },
+            branch: { description: "Branch name", required: true },
+          },
+        },
+        {
           command: "comment <repo> <number> --body-file <path>",
           description: "Post an issue or PR conversation comment as ShitRat",
           params: {
@@ -815,6 +913,125 @@ export const statusCmd = Command.make("status", { repo: repoArg }, ({ repo }) =>
     ),
   ),
 ).pipe(Command.withDescription("Verify ShitRat GitHub App access to a repo"))
+
+export const deleteBranchCmd = Command.make(
+  "delete-branch",
+  { repo: repoArg, branch: branchNameArg, dryRun: branchDeleteDryRunOption },
+  ({ repo, branch, dryRun }) =>
+    Effect.gen(function* () {
+      const repoRef = parseRepo(repo)
+      const targetBranch = normalizeGitRef(branch)
+      const command = `delete-branch ${repoRef.fullName} ${targetBranch}`
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const receipt = yield* Effect.tryPromise({
+        try: () =>
+          deleteBranchSafely(
+            {
+              getRepository: async () => {
+                const response = await octokit.rest.repos.get({
+                  owner: repoRef.owner,
+                  repo: repoRef.repo,
+                })
+                return { defaultBranch: response.data.default_branch }
+              },
+              getBranch: async (target) => {
+                const response = await octokit.rest.repos.getBranch({
+                  owner: repoRef.owner,
+                  repo: repoRef.repo,
+                  branch: target,
+                })
+                return {
+                  sha: response.data.commit.sha,
+                  isProtected: response.data.protected,
+                }
+              },
+              deleteRef: async (ref) => {
+                await octokit.rest.git.deleteRef({
+                  owner: repoRef.owner,
+                  repo: repoRef.repo,
+                  ref,
+                })
+              },
+            },
+            targetBranch,
+            dryRun,
+          ),
+        catch: toError,
+      })
+
+      yield* printSuccess(
+        command,
+        {
+          repo: repoRef.fullName,
+          branch: receipt.branch,
+          ref: receipt.ref,
+          sha: receipt.sha,
+          default_branch: receipt.defaultBranch,
+          protected: receipt.isProtected,
+          dry_run: receipt.dryRun,
+          deleted: receipt.deleted,
+          github_write: receipt.deleted,
+          actor: "shitratgit[bot]",
+          installation_id: token.installationId,
+        },
+        dryRun
+          ? [
+              {
+                command: "delete-branch <repo> <branch>",
+                description: "Delete this verified non-default, unprotected branch as ShitRat",
+                params: {
+                  repo: { value: repoRef.fullName, required: true },
+                  branch: { value: targetBranch, required: true },
+                },
+              },
+            ]
+          : [
+              {
+                command: "status <repo>",
+                description: "Verify ShitRat still has access to this repository",
+                params: { repo: { value: repoRef.fullName, required: true } },
+              },
+            ],
+      )
+    }).pipe(
+      Effect.catchAll((error) => {
+        if (error instanceof BranchDeletionRefusal) {
+          const isDefaultBranch = error.reason === "default_branch"
+          return printFailure(
+            `delete-branch ${repo} ${branch}`,
+            error,
+            isDefaultBranch ? "DEFAULT_BRANCH_DELETE_REFUSED" : "PROTECTED_BRANCH_DELETE_REFUSED",
+            isDefaultBranch
+              ? "Choose a non-default branch. ShitRat never deletes the repository default branch."
+              : "Review the branch protection or ruleset. ShitRat refuses to delete protected branches.",
+            [
+              {
+                command: "status <repo>",
+                description: "Verify ShitRat access and inspect the repository default branch",
+                params: { repo: { value: repo, required: true } },
+              },
+            ],
+          )
+        }
+        return printFailure(
+          `delete-branch ${repo} ${branch}`,
+          error,
+          "DELETE_BRANCH_FAILED",
+          "Verify Contents: read and write access, that the branch exists, and that GitHub can delete it. Use --dry-run first.",
+          [
+            {
+              command: "delete-branch <repo> <branch> --dry-run",
+              description: "Read the repository and branch protection state without deleting it",
+              params: {
+                repo: { value: repo, required: true },
+                branch: { value: branch, required: true },
+              },
+            },
+          ],
+        )
+      }),
+    ),
+).pipe(Command.withDescription("Delete an unprotected, non-default branch as ShitRat"))
 
 export const createReviewCommentReply = (
   octokit: Pick<GitHubOctokit["rest"]["pulls"], "createReplyForReviewComment">,

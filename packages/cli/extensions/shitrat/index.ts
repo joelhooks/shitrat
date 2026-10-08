@@ -102,6 +102,17 @@ const summarizeShitRatResult = (value: unknown): string => {
   const base = stringValue(result.base)
   const head = stringValue(result.head)
 
+  if (command.startsWith("shitrat delete-branch")) {
+    return [
+      dryRun ? "🧪 Dry run: branch is eligible for deletion" : "✅ ShitRat deleted branch",
+      repo && branch ? `${repo}@${branch}` : repo,
+      stringValue(result.ref) ? `Ref: ${result.ref}` : undefined,
+      stringValue(result.sha) ? `SHA: ${result.sha}` : undefined,
+    ]
+      .filter(Boolean)
+      .join("\n")
+  }
+
   if (command.startsWith("shitrat merge")) {
     return [
       dryRun ? "🧪 Dry run: ShitRat merge ready" : "✅ ShitRat merged branch",
@@ -200,6 +211,7 @@ export default function shitratExtension(pi: ExtensionAPI) {
       const items = [
         "installations",
         "status skillrecordings/migrate-egghead",
+        "delete-branch joelhooks/shitrat-cli feature-branch --dry-run",
         "merge skillrecordings/migrate-egghead --base main --head feature-branch --dry-run",
         "commit-file skillrecordings/migrate-egghead --branch main --message 'message' --file path --dry-run",
         "commit-files skillrecordings/migrate-egghead --branch main --message 'message' --file path --file other --dry-run",
@@ -229,6 +241,29 @@ export default function shitratExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal) {
       const result = await runShitRat(pi, ["status", params.repo], signal)
       return toolResult(result)
+    },
+  })
+
+  pi.registerTool({
+    name: "shitrat_delete_branch",
+    label: "ShitRat Delete Branch",
+    description: "Inspect or delete an unprotected, non-default GitHub branch as shitratgit[bot].",
+    promptSnippet: "Inspect or delete GitHub branches as shitratgit[bot] via the ShitRat GitHub App",
+    promptGuidelines: [
+      "The tool defaults to dryRun: true. Use dryRun: false only after Joel explicitly authorized deletion of this exact branch.",
+      "The CLI refuses the repository default branch and protected branches; never bypass those refusals.",
+    ],
+    parameters: Type.Object({
+      repo: Type.String({ description: "Repository in owner/repo form" }),
+      branch: Type.String({ description: "Branch name to inspect or delete" }),
+      dryRun: Type.Optional(
+        Type.Boolean({ description: "Read branch and protection state; defaults to true" }),
+      ),
+    }),
+    async execute(_toolCallId, params, signal) {
+      const args = ["delete-branch", params.repo, params.branch]
+      if (params.dryRun !== false) args.push("--dry-run")
+      return toolResult(await runShitRat(pi, args, signal))
     },
   })
 

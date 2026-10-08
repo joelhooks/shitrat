@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { gitModeFromFileMode } from "../src/commands/github.js"
+import {
+  BranchDeletionRefusal,
+  deleteBranchSafely,
+  gitModeFromFileMode,
+} from "../src/commands/github.js"
 import {
   buildAuthenticatedGitInvocation,
   buildFetchCommandArgs,
@@ -109,6 +113,114 @@ describe("github repo parsing", () => {
 
   test("rejects loose names", () => {
     expect(() => parseRepo("migrate-egghead")).toThrow("Invalid repo")
+  })
+})
+
+describe("branch deletion", () => {
+  test("dry-runs an unprotected branch and reports its current sha without deleting", async () => {
+    let deletedRef: string | undefined
+    const receipt = await deleteBranchSafely(
+      {
+        getRepository: async () => ({ defaultBranch: "main" }),
+        getBranch: async () => ({ sha: "abc123", isProtected: false }),
+        deleteRef: async (ref) => {
+          deletedRef = ref
+        },
+      },
+      "feature/topic",
+      true,
+    )
+
+    expect(receipt).toEqual({
+      branch: "feature/topic",
+      ref: "refs/heads/feature/topic",
+      defaultBranch: "main",
+      sha: "abc123",
+      isProtected: false,
+      dryRun: true,
+      deleted: false,
+    })
+    expect(deletedRef).toBeUndefined()
+  })
+
+  test("deletes an unprotected non-default branch and returns its ref sha", async () => {
+    let deletedRef: string | undefined
+    const receipt = await deleteBranchSafely(
+      {
+        getRepository: async () => ({ defaultBranch: "main" }),
+        getBranch: async () => ({ sha: "def456", isProtected: false }),
+        deleteRef: async (ref) => {
+          deletedRef = ref
+        },
+      },
+      "feature/topic",
+      false,
+    )
+
+    expect(deletedRef).toBe("heads/feature/topic")
+    expect(receipt.sha).toBe("def456")
+    expect(receipt.deleted).toBe(true)
+  })
+
+  test("refuses the default branch before reading or deleting its ref", async () => {
+    let branchLookups = 0
+    let deletedRef: string | undefined
+    let caught: unknown
+    try {
+      await deleteBranchSafely(
+        {
+          getRepository: async () => ({ defaultBranch: "main" }),
+          getBranch: async () => {
+            branchLookups += 1
+            return { sha: "abc123", isProtected: false }
+          },
+          deleteRef: async (ref) => {
+            deletedRef = ref
+          },
+        },
+        "main",
+        false,
+      )
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught).toBeInstanceOf(BranchDeletionRefusal)
+    expect(caught).toMatchObject({ reason: "default_branch" })
+    expect(branchLookups).toBe(0)
+    expect(deletedRef).toBeUndefined()
+  })
+
+  test("refuses a protected branch without deleting it", async () => {
+    let deletedRef: string | undefined
+    let caught: unknown
+    try {
+      await deleteBranchSafely(
+        {
+          getRepository: async () => ({ defaultBranch: "main" }),
+          getBranch: async () => ({ sha: "abc123", isProtected: true }),
+          deleteRef: async (ref) => {
+            deletedRef = ref
+          },
+        },
+        "release/stable",
+        false,
+      )
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught).toBeInstanceOf(BranchDeletionRefusal)
+    expect(caught).toMatchObject({ reason: "protected_branch" })
+    expect(deletedRef).toBeUndefined()
+  })
+
+  test("lists delete-branch in root command discovery", async () => {
+    const result = await runCli()
+
+    expect(result.exitCode).toBe(0)
+    expect(result.json.ok).toBe(true)
+    expect(result.stdout).toContain("delete_branch")
   })
 })
 

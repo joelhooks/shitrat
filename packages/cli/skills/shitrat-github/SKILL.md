@@ -1,6 +1,6 @@
 ---
 name: shitrat-github
-description: Post GitHub issue comments, inline PR review replies, PR reviews, edit pull requests, and small file commits as the ShitRat GitHub App (`shitratgit[bot]`) instead of Joel. Use when reviewing PRs, replying to review threads, updating PR metadata, commenting on issues, doing smoke tests, committing repo files through the GitHub API, or any workflow where GitHub authorship should be ShitRat.
+description: Post GitHub issue comments, inline PR review replies, PR reviews, edit pull requests, delete branches, and small file commits as the ShitRat GitHub App (`shitratgit[bot]`) instead of Joel. Use when reviewing PRs, replying to review threads, updating PR metadata, commenting on issues, deleting an authorized branch, doing smoke tests, committing repo files through the GitHub API, or any workflow where GitHub authorship should be ShitRat.
 ---
 
 # ShitRat GitHub
@@ -26,6 +26,7 @@ shitrat checks badass-courses/drovr <sha>
 shitrat pr-status badass-courses/drovr 867
 shitrat run-log badass-courses/drovr <job-id> --tail 300
 shitrat rerun badass-courses/drovr <run-id> --failed --dry-run
+shitrat delete-branch joelhooks/shitrat-cli feature-branch --dry-run
 shitrat merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch"
 shitrat push joelhooks/shitrat-cli --repo-dir /path/to/checkout
 shitrat commit-file joelhooks/shitrat-cli --branch main --message "docs: update notes" --file README.md
@@ -42,6 +43,7 @@ If the pi extension is loaded, prefer the tools:
 - `shitrat_merge`
 - `shitrat_commit_file`
 - `shitrat_commit_files`
+- `shitrat_delete_branch`
 
 ## Safety rails
 
@@ -56,7 +58,8 @@ If the pi extension is loaded, prefer the tools:
 - After a real `push` or `create-pr`, ShitRat runs `fleet-compute attest --github <repo> --sha <full head sha>` when fleet-compute is on PATH. It is best-effort: exit 3 (including `FLEET_ATTEST=off`) adds nothing; any other outcome lands in the `attest` field, and the push or PR result stays `ok: true`. Every attempt, including exit 3 with its reason and `"fleet-compute": "missing"`, is appended to `~/.shitrat/log/attest.jsonl`; read that file back instead of the push JSON.
 - Use `shitrat status <owner/repo>` first when repo access is uncertain.
 - Use `--body-file` for non-trivial Markdown so shell quoting does not mangle review text.
-- Use `--dry-run` before writing unless Joel explicitly asked to commit/merge as ShitRat.
+- Use `--dry-run` before writing unless Joel explicitly asked for that exact action.
+- `delete-branch` reads the repository default and branch protection, refuses either protected case, and reports the ref SHA. A successful dry run does not authorize deletion; only delete the exact branch Joel approved.
 - `merge` uses GitHub's merge endpoint to merge one branch into another as `shitratgit[bot]`, so do not fake a merge by replaying branch contents onto `main`.
 - When a checkout exists, commit locally as `shitratgit[bot]` so commit hooks run, then publish the unchanged commits with `shitrat push`. It rejects non-bot outgoing authors unless `--allow-any-author` is explicit, disables `pre-push` hooks so they cannot inherit the installation token, and never rewrites history or force-pushes.
 - `commit-file` is for small, intentional clone-less edits. `commit-files` is for small atomic clone-less batches. On existing branches they use GitHub blobs/trees with web-flow signing; on brand-new empty repos they create one root commit through a temporary ShitRat-authenticated git push. They cannot run local hooks.
