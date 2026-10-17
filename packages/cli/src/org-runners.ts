@@ -1,0 +1,92 @@
+import { Octokit } from "@octokit/rest"
+import { Effect } from "effect"
+import { createInstallationToken, parseRepo, type GitHubOctokit } from "./github-app.js"
+
+// Never retain an Octokit error: it can contain authorization headers or response tokens.
+export class RunnerApiError extends Error {
+  constructor(readonly endpoint: string, readonly status?: number, readonly permission = "organization_self_hosted_runners: write") {
+    super(status === 403
+      ? `${endpoint}: HTTP 403; requires ${permission}. Stop; do not change app permissions.`
+      : `${endpoint}: ${status ? `HTTP ${status}` : "request failed"}`)
+  }
+}
+
+export const runnerApiCall = async <T>(endpoint: string, request: () => Promise<T>, permission?: string): Promise<T> => {
+  try {
+    return await request()
+  } catch (error) {
+    const status = typeof error === "object" && error !== null && "status" in error && typeof error.status === "number"
+      ? error.status : undefined
+    throw new RunnerApiError(endpoint, status, permission)
+  }
+}
+
+export const createOrgOctokit = (org: string) => createInstallationToken(org).pipe(
+  Effect.map(({ token }) => new Octokit({
+    auth: token,
+    // Octokit's default logger can print an HTTP error before our sanitizer sees it.
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+  })),
+)
+
+export const registrationToken = async (octokit: GitHubOctokit, org: string) => {
+  const { data } = await runnerApiCall("POST /orgs/{org}/actions/runners/registration-token", () =>
+    octokit.rest.actions.createRegistrationTokenForOrg({ org }))
+  // Only a single opaque token and an ISO timestamp may reach the output adapter.
+  if (typeof data.token !== "string" || !/^[A-Za-z0-9_-]+$/.test(data.token) || typeof data.expires_at !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(data.expires_at)) {
+    throw new RunnerApiError("runner registration response validation")
+  }
+  return { token: data.token, expires_at: data.expires_at }
+}
+
+const groups = (octokit: GitHubOctokit, org: string) => runnerApiCall("GET /orgs/{org}/actions/runner-groups", () =>
+  octokit.paginate("GET /orgs/{org}/actions/runner-groups", { org, per_page: 100 }), "organization_self_hosted_runners: read")
+
+export const ensureRunnerGroup = async (octokit: GitHubOctokit, input: { org: string; name: string; repo: string; dryRun: boolean }) => {
+  const { org, name, dryRun } = input
+  const ref = parseRepo(input.repo)
+  if (ref.owner.toLowerCase() !== org.toLowerCase()) throw new RunnerApiError("repository must belong to --org")
+  const { data: repo } = await runnerApiCall("GET /repos/{owner}/{repo}", () => octokit.rest.repos.get({ owner: ref.owner, repo: ref.repo }), "repository metadata: read")
+  if (repo.private === false) throw new RunnerApiError("public repository refused: allows_public_repositories is false")
+  const found = (await groups(octokit, org)).filter((group) => group.name === name)
+  if (found.length > 1) throw new RunnerApiError("ambiguous runner group name")
+  const existing = found[0]
+  const policy = { visibility: "selected" as const, allows_public_repositories: false }
+  const desired = { ...policy, selected_repository_ids: [repo.id] }
+  if (dryRun) return { dry_run: true, action: existing ? "update" : "create", id: existing?.id ?? null, name, ...desired, repositories: [{ id: repo.id, full_name: repo.full_name }] }
+
+  const group = existing
+    ? (await runnerApiCall("PATCH /orgs/{org}/actions/runner-groups/{runner_group_id}", () =>
+      octokit.request("PATCH /orgs/{org}/actions/runner-groups/{runner_group_id}", { org, runner_group_id: existing.id, name, ...policy }))).data
+    : (await runnerApiCall("POST /orgs/{org}/actions/runner-groups", () =>
+      octokit.request("POST /orgs/{org}/actions/runner-groups", { org, name, ...desired }))).data
+  if (existing) await runnerApiCall("PUT /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories", () =>
+    octokit.request("PUT /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories", { org, runner_group_id: group.id, selected_repository_ids: [repo.id] }))
+
+  // Read back the effective policy rather than claiming the requested state was saved.
+  const { data: saved } = await runnerApiCall("GET /orgs/{org}/actions/runner-groups/{runner_group_id}", () =>
+    octokit.request("GET /orgs/{org}/actions/runner-groups/{runner_group_id}", { org, runner_group_id: group.id }), "organization_self_hosted_runners: read")
+  const repositories = await runnerApiCall("GET /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories", () =>
+    octokit.paginate("GET /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories", { org, runner_group_id: group.id, per_page: 100 }), "organization_self_hosted_runners: read")
+  if (saved.visibility !== "selected" || saved.allows_public_repositories !== false || repositories.length !== 1 || repositories[0]?.id !== repo.id) {
+    throw new RunnerApiError("runner group policy readback mismatch")
+  }
+  return { dry_run: false, id: saved.id, name: saved.name, visibility: saved.visibility, allows_public_repositories: saved.allows_public_repositories, repositories: repositories.map(({ id, full_name }) => ({ id, full_name })) }
+}
+
+export const listOrgRunners = async (octokit: GitHubOctokit, org: string, groupName?: string) => {
+  const allGroups = await groups(octokit, org)
+  const selected = groupName === undefined ? allGroups : allGroups.filter(({ name }) => name === groupName)
+  if (groupName !== undefined && selected.length !== 1) throw new RunnerApiError("runner group not found or ambiguous")
+  const membership = new Map<number, { id: number; name: string }>()
+  for (const group of selected) {
+    const runners = await runnerApiCall("GET /orgs/{org}/actions/runner-groups/{runner_group_id}/runners", () =>
+      octokit.paginate("GET /orgs/{org}/actions/runner-groups/{runner_group_id}/runners", { org, runner_group_id: group.id, per_page: 100 }), "organization_self_hosted_runners: read")
+    for (const runner of runners) membership.set(runner.id, { id: group.id, name: group.name })
+  }
+  const runners = await runnerApiCall("GET /orgs/{org}/actions/runners", () =>
+    octokit.paginate(octokit.rest.actions.listSelfHostedRunnersForOrg, { org, per_page: 100 }), "organization_self_hosted_runners: read")
+  return runners.filter(({ id }) => groupName === undefined || membership.has(id)).map(({ id, name, status, busy, labels }) => ({
+    id, name, status, busy, labels: labels.map(({ name }) => name), group: membership.get(id) ?? null,
+  }))
+}

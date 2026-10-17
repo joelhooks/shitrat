@@ -1,0 +1,26 @@
+---
+title: GitHub organization runner commands
+type: project
+status: active
+tags: [cli, github, runners]
+---
+
+# GitHub organization runner commands
+
+The CLI uses the organization's GitHub App installation for runner management. These endpoints do not use repository administration or request new App permissions.
+
+`runner-token --org <org>` deliberately bypasses the JSON envelope. Stdout carries only the registration token and a newline. Stderr carries the validated expiry or a sanitized failure. The command does not call attestation or write credentials to disk. Octokit logging is disabled for this client because request errors can carry credentials.
+
+`runner-group --org <org> --name <name> --repo <owner/repo>` creates or restricts a group to exactly one private repository. It sets selected visibility and disables public repositories. Existing groups replace their repository allowlist. Readback verifies the effective policy before reporting success. The update uses separate policy and repository-access requests, so a failed second request can leave a partial update; rerun only after inspecting the reported endpoint failure. Dry-run reads the target and reports the intended policy without writes.
+
+`runners --org <org> [--group <name>]` reads runners and their group membership. All collection reads follow GitHub pagination. A missing named group fails instead of silently returning an empty list.
+
+## Source and proof
+
+- `packages/cli/src/org-runners.ts`: API operations and sanitized errors.
+- `packages/cli/src/commands/runners.ts`: command adapters and token-only writer.
+- `packages/cli/src/cli.ts`: command discovery and the token-only output exception.
+- `packages/cli/test/runner-token.test.ts`: real CLI subprocesses with fake HTTP responses, temporary homes, and forbidden subprocess spawns.
+- `packages/cli/test/org-runners.test.ts`: group policy, pagination, dry-run, permission failures, and runner membership.
+
+These tests do not mint real tokens or mutate real runner groups. Live registration and deployment remain separate operator work.
