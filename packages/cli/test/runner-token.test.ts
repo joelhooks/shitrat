@@ -59,15 +59,47 @@ describe("runner-token CLI secret output boundary", () => {
     const result = await run()
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toBe(`${TOKEN}\n`)
-    expect(result.stderr).toBe("expires_at: 2026-10-17T20:00:00Z\n")
+    expect(result.stderr).toBe("expires_at: 2026-10-17T12:13:35.123-08:00\n")
     expect(result.requests).toEqual(["POST /app/installations/123/access_tokens", "POST /orgs/example/actions/runners/registration-token"])
   })
   test("global logging options before the verb cannot wrap or log the token", async () => {
     const result = await run({}, ["--org", "example"], ["--log-level", "debug"])
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toBe(`${TOKEN}\n`)
-    expect(result.stderr).toBe("expires_at: 2026-10-17T20:00:00Z\n")
+    expect(result.stderr).toBe("expires_at: 2026-10-17T12:13:35.123-08:00\n")
   })
+  for (const expiry of [
+    "2026-10-17T20:00:00Z",
+    "2026-10-17T20:00:00.1Z",
+    "2026-10-17T20:00:00.123456789Z",
+    "2026-10-17T20:00:00+00:00",
+    "2026-10-17T20:00:00-07:00",
+    "2026-10-17T20:00:00.123+05:30",
+  ]) test(`accepts ISO expiry ${expiry} without changing the output contract`, async () => {
+    const result = await run({ RUNNER_TEST_EXPIRY: expiry })
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe(`${TOKEN}\n`)
+    expect(result.stderr).toBe(`expires_at: ${expiry}\n`)
+  })
+  for (const expiry of [
+    "2026-10-17T20:00:00.1234567890Z",
+    "2026-10-17T20:00:00.Z",
+    "2026-10-17T20:00:00-0700",
+    `2026-10-17T20:00:00.123-07:00\n${TOKEN}`,
+  ]) test(`refuses malformed expiry ${JSON.stringify(expiry)} without leaking`, async () => {
+    const result = await run({ RUNNER_TEST_EXPIRY: expiry })
+    expect(result.exitCode).not.toBe(0)
+    expect(result.stdout).toBe("")
+    expect(result.stderr).toBe("runner registration response validation: request failed\n")
+  })
+  for (const expiry of ["tomorrow", "", "2099", "2020-01-22T12:13:35.123-08:00", "2026-10-17T00:00:00Z", "2026-10-17T01:00:00+02:00", "2099-99-99T20:00:00Z", 12345678900000]) {
+    test(`refuses invalid, non-future, or non-string expiry ${JSON.stringify(expiry)}`, async () => {
+      const result = await run({ RUNNER_TEST_EXPIRY_JSON: JSON.stringify(expiry) })
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout).toBe("")
+      expect(result.stderr).toBe("runner registration response validation: request failed\n")
+    })
+  }
   test("a 403 containing both credentials leaks neither and exits nonzero", async () => {
     const result = await run({ RUNNER_TEST_FAILURE: "1" })
     expect(result.exitCode).not.toBe(0)
