@@ -2,7 +2,7 @@
 
 GitHub App CLI and pi package for posting as `shitratgit[bot]` instead of Joel.
 
-ShitRat uses short-lived GitHub App installation tokens, not Joel's PAT. The CLI is agent-first: every command emits a JSON envelope with `ok`, `result`, and `next_actions`.
+ShitRat uses short-lived GitHub App installation tokens, not Joel's PAT. The CLI is agent-first: commands emit a JSON envelope with `ok`, `result`, and `next_actions`. `runner-token` is the exception: stdout contains only the registration token and a newline; expiry, help, and errors go to stderr.
 
 ## Install
 
@@ -90,6 +90,17 @@ bun run src/cli.ts run-log badass-courses/drovr <job-id> --tail 300
 # Rerun a workflow run, or only its failed jobs. Reports run_attempt as GitHub reads it back;
 # 403/404/409 come back as typed errors (PERMISSION_DENIED, NOT_FOUND, CONFLICT).
 bun run src/cli.ts rerun badass-courses/drovr <run-id> --failed --dry-run
+
+# Preview an org runner group restricted to exactly one private repo. Existing access is replaced.
+bun run src/cli.ts runner-group --org example --name isolated --repo example/project --dry-run
+# Apply only after authorizing the runner group change.
+bun run src/cli.ts runner-group --org example --name isolated --repo example/project
+# Read back org runners, optionally restricted to a group.
+bun run src/cli.ts runners --org example --group isolated
+# Mint an org registration token only when needed. Keep stdout on a private pipe;
+# do not redirect it to a file/log or pass it through a child process argv.
+# A 403 names the endpoint and required permission; stop rather than adding permissions.
+bun run src/cli.ts runner-token --org example
 
 # Preview a branch merge as shitratgit[bot]
 bun run src/cli.ts merge joelhooks/shitrat-cli --base main --head feature-branch --message "merge: feature branch" --dry-run

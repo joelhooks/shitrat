@@ -42,6 +42,7 @@ import {
   setStatusCmd,
   statusCmd,
 } from "./commands/github.js"
+import { runnerGroupCmd, runnersCmd, runnerTokenCmd, runnerTokenInvoked } from "./commands/runners.js"
 import { inboxCmd } from "./commands/inbox.js"
 import { xCmd } from "./commands/x.js"
 import { errorMessage, failure, json, success } from "./response.js"
@@ -86,6 +87,9 @@ const root = Command.make("shitrat", {}, () =>
               pr_status: "shitrat pr-status <owner/repo> <pull-number>",
               run_log: "shitrat run-log <owner/repo> <job-id> [--tail <lines>]",
               rerun: "shitrat rerun <owner/repo> <run-id> [--failed] [--dry-run]",
+              runner_token: "shitrat runner-token --org <org> (token-only stdout; expiry on stderr)",
+              runner_group: "shitrat runner-group --org <org> --name <name> --repo <owner/repo> [--dry-run]",
+              runners: "shitrat runners --org <org> [--group <name>]",
               install:
                 "shitrat install pi|claude|codex-desktop --dry-run",
               update:
@@ -293,6 +297,9 @@ const root = Command.make("shitrat", {}, () =>
     prStatusCmd,
     runLogCmd,
     rerunCmd,
+    runnerTokenCmd,
+    runnerGroupCmd,
+    runnersCmd,
     editPrCmd,
     commitFileCmd,
     commitFilesCmd,
@@ -587,6 +594,8 @@ const handleNativeShitRatCommand = async (args: readonly string[]): Promise<bool
   return false
 }
 
+// runner-token never enters the generic JSON envelope, including usage failures.
+const tokenOnlyOutput = argv[2] === "runner-token"
 const capturedStdout: string[] = []
 const capturedStderr: string[] = []
 const rawStdoutWrite = process.stdout.write.bind(process.stdout)
@@ -652,6 +661,13 @@ const run = cli(argv).pipe(Effect.provide(BunContext.layer))
 Effect.runPromise(run)
   .then(() => {
     restoreOutput()
+    if (tokenOnlyOutput || runnerTokenInvoked) {
+      // Only explicit help/version may emit captured metadata. Never replay request logs.
+      if (argv.includes("--help") || argv.includes("-h") || argv.includes("--version")) {
+        rawStderrWrite(capturedStdout.join("") + capturedStderr.join(""))
+      }
+      return
+    }
     const stdout = capturedStdout.join("")
     const stderr = capturedStderr.join("")
     if (isJsonEnvelope(stdout)) {
@@ -675,6 +691,12 @@ Effect.runPromise(run)
   })
   .catch((error: unknown) => {
     restoreOutput()
+    if (tokenOnlyOutput || runnerTokenInvoked) {
+      // Parser and Effect errors may contain arbitrary input or request details.
+      rawStderrWrite("runner-token failed; use `shitrat runner-token --help` and check App installation access.\n")
+      process.exitCode = 1
+      return
+    }
     const stderr = stripAnsi(capturedStderr.join("")).trim()
     writeStdout(
       json(
