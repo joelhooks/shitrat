@@ -103,6 +103,14 @@ describe("runners", () => {
   })
 })
 
+test("registration token accepts GitHub's documented token alphabet", async () => {
+  // Public example from GitHub's registration-token documentation, not a credential.
+  const token = "LLBF3JGZDX3P5PMEXLND6TS6FCWO6"
+  const expires_at = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+  const gh = github({ "POST /orgs/example/actions/runners/registration-token": { body: { token, expires_at } } })
+  expect(await registrationToken(gh.octokit, "example")).toEqual({ token, expires_at })
+})
+
 test("registration token rejects invalid token syntax without including it in errors", async () => {
   const gh = github({ "POST /orgs/example/actions/runners/registration-token": { body: { token: "bad\nsecret", expires_at: "2026-10-17T20:00:00Z" } } })
   await expect(registrationToken(gh.octokit, "example")).rejects.toThrow("response validation")

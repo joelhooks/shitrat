@@ -2,6 +2,8 @@
 import { mock } from "bun:test"
 import { writeFileSync } from "node:fs"
 
+// Freeze the clock so future/past validation remains deterministic as calendar time advances.
+Date.now = () => Date.parse("2026-10-17T00:00:00Z")
 const TOKEN = "TEST-RUNNER-TOKEN-0f3c"
 const INSTALLATION_TOKEN = "TEST-INSTALLATION-TOKEN-9d2a"
 const spawned: unknown[] = []
@@ -35,7 +37,10 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
     if (authorization !== `token ${INSTALLATION_TOKEN}` && authorization !== `Bearer ${INSTALLATION_TOKEN}`) throw new Error("Wrong installation auth")
     if (process.env.RUNNER_TEST_FAILURE) return reply({ message: `Do not print ${TOKEN} or ${INSTALLATION_TOKEN}`, token: TOKEN }, 403)
     if (process.env.RUNNER_TEST_INVALID) return reply({ token: TOKEN, expires_at: `invalid ${TOKEN}` })
-    return reply({ token: TOKEN, expires_at: "2026-10-17T20:00:00Z" }, 201)
+    const expiry: unknown = process.env.RUNNER_TEST_EXPIRY_JSON !== undefined
+      ? JSON.parse(process.env.RUNNER_TEST_EXPIRY_JSON)
+      : process.env.RUNNER_TEST_EXPIRY ?? "2026-10-17T12:13:35.123-08:00"
+    return reply({ token: TOKEN, expires_at: expiry }, 201)
   }
   throw new Error(`Unexpected network request: ${route}`)
 }) as typeof fetch

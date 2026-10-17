@@ -15,6 +15,14 @@ The CLI uses the organization's GitHub App installation for runner management. T
 
 `runners --org <org> [--group <name>]` reads runners and their group membership. All collection reads follow GitHub pagination. A missing named group fails instead of silently returning an empty list.
 
+## Registration expiry validation
+
+GitHub's [registration-token example](https://docs.github.com/en/rest/actions/self-hosted-runners#create-a-registration-token-for-an-organization) includes fractional seconds and a timezone offset. The initial whole-second `Z`-only check rejected that valid response shape. A matching CLI fixture reproduced the failure without live credentials.
+
+The expiry must be a string with an ISO timestamp shape, parse with `Date.parse` to a real instant, and be strictly later than `Date.now()`. Shape validation alone does not prove the expiry is valid or future. The token alphabet check remains unchanged. Invalid metadata fails with the fixed sanitized error and empty stdout.
+
+CLI fixtures freeze the clock so offset, `Z`, expired, equal-to-now, malformed, and non-string expiry cases stay deterministic. They retain all credential-leak and subprocess assertions. No production token response belongs in the fixtures.
+
 ## Source and proof
 
 - `packages/cli/src/org-runners.ts`: API operations and sanitized errors.

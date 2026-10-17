@@ -32,8 +32,10 @@ export const createOrgOctokit = (org: string) => createInstallationToken(org).pi
 export const registrationToken = async (octokit: GitHubOctokit, org: string) => {
   const { data } = await runnerApiCall("POST /orgs/{org}/actions/runners/registration-token", () =>
     octokit.rest.actions.createRegistrationTokenForOrg({ org }))
-  // Only a single opaque token and an ISO timestamp may reach the output adapter.
-  if (typeof data.token !== "string" || !/^[A-Za-z0-9_-]+$/.test(data.token) || typeof data.expires_at !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(data.expires_at)) {
+  // Require an ISO-shaped string that Date can parse to a future instant. GitHub
+  // includes fractional seconds and UTC offsets, not just whole seconds with Z.
+  const expiresAt = typeof data.expires_at === "string" ? Date.parse(data.expires_at) : NaN
+  if (typeof data.token !== "string" || !/^[A-Za-z0-9_-]+$/.test(data.token) || typeof data.expires_at !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{1,9})?(Z|[+-]\d\d:\d\d)$/.test(data.expires_at) || Number.isNaN(expiresAt) || expiresAt <= Date.now()) {
     throw new RunnerApiError("runner registration response validation")
   }
   return { token: data.token, expires_at: data.expires_at }
