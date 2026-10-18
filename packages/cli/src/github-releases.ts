@@ -63,7 +63,9 @@ export const createAnnotatedTag = async (
   const readRef = await request("Read back tag ref", () => octokit.rest.git.getRef(ref))
   const readTag = await request("Read back annotated tag", () => octokit.rest.git.getTag({ owner: repo.owner, repo: repo.repo, tag_sha: created.data.sha }))
   if (readRef.data.ref !== writtenRef.ref || readRef.data.object.type !== "tag" || readRef.data.object.sha !== created.data.sha ||
-    readTag.data.sha !== created.data.sha || readTag.data.tag !== payload.tag || readTag.data.message !== payload.message ||
+    readTag.data.sha !== created.data.sha || readTag.data.tag !== payload.tag ||
+    // GitHub normalizes tag annotations with a trailing newline; ignore exactly one, not arbitrary whitespace.
+    readTag.data.message.replace(/\n$/, "") !== payload.message.replace(/\n$/, "") ||
     readTag.data.object.type !== "commit" || readTag.data.object.sha !== target) {
     fail("TAG_READBACK_MISMATCH", "Tag read-back did not match the requested annotation and target. Inspect the tag; no rollback was attempted.")
   }

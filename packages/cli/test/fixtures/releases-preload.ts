@@ -49,7 +49,7 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
     tagCreated = true
     return reply({ ref: body.ref, object: { type: "tag", sha: tagSha } }, 201)
   }
-  if (route === `GET /repos/example/project/git/tags/${tagSha}`) return reply({ sha: tagSha, tag: tagBody.tag, message: scenario === "tag-message-mismatch" || scenario === "existing-tag-annotation" ? "Different annotation" : tagBody.message, object: { type: "commit", sha: scenario === "tag-target-mismatch" ? "c".repeat(40) : target } })
+  if (route === `GET /repos/example/project/git/tags/${tagSha}`) return reply({ sha: tagSha, tag: tagBody.tag, message: scenario === "tag-message-mismatch" || scenario === "existing-tag-annotation" ? "Different annotation" : scenario === "tag-message-newline" ? `${tagBody.message}\n` : scenario === "tag-message-double-newline" ? `${tagBody.message}\n\n` : tagBody.message, object: { type: "commit", sha: scenario === "tag-target-mismatch" ? "c".repeat(40) : target } })
   if (route === "GET /repos/example/project/releases") {
     if (scenario === "list-permission-denied") return reply({ message: "FAKE-INSTALLATION-TOKEN" }, 403)
     if (scenario === "duplicate-release") return reply([{ tag_name: "v0.1.0", draft: false }])

@@ -86,7 +86,22 @@ describe("annotated tag safety", () => {
     expect(result.requests.slice(-2).map((r) => r.route)).toEqual(["GET /repos/example/project/git/ref/tags/v0.1.0", `GET /repos/example/project/git/tags/${tagSha}`])
     expect(result.envelope.result).toMatchObject({ created: true, github_write: true, tag_object_sha: tagSha, target })
   })
-  for (const scenario of ["tag-ref-mismatch", "tag-message-mismatch", "tag-target-mismatch"]) test(`reports ${scenario} without rollback`, async () => {
+  test("accepts the single trailing newline GitHub adds to the annotation readback", async () => {
+    const result = await run("tag", ["--message", "Release v0.1.0", "--yes"], "tag-message-newline")
+    expect(result.exitCode).toBe(0)
+    expect(result.envelope.result).toMatchObject({ created: true, github_write: true })
+    expect(result.writes).toEqual([
+      { route: "POST /repos/example/project/git/tags", body: { ...tagPayload, message: "Release v0.1.0" } },
+      { route: "POST /repos/example/project/git/refs", body: { ref: "refs/tags/v0.1.0", sha: tagSha } },
+    ])
+  })
+  test("preserves a supplied annotation newline in the request and readback", async () => {
+    const result = await run("tag", ["--message", "Release v0.1.0\n", "--yes"])
+    expect(result.exitCode).toBe(0)
+    expect(result.envelope.result).toMatchObject({ created: true, github_write: true })
+    expect(result.writes[0]?.body).toEqual({ ...tagPayload, message: "Release v0.1.0\n" })
+  })
+  for (const scenario of ["tag-ref-mismatch", "tag-message-mismatch", "tag-target-mismatch", "tag-message-double-newline"]) test(`reports ${scenario} without rollback`, async () => {
     const result = await run("tag", ["--yes"], scenario)
     expect(result.exitCode).not.toBe(0)
     expect(result.envelope.error.code).toBe("TAG_READBACK_MISMATCH")
