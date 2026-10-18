@@ -22,6 +22,7 @@ import {
 import { attestPushedSha, withAttest } from "../attest.js"
 import { CiReadError, isFailingRun, readChecks, readJobLog, readPullRequestStatus, rerunWorkflowRun } from "../ci-reads.js"
 import { labelIssue, setCommitStatus } from "../labels-statuses.js"
+import { createAnnotatedTag, createGitHubRelease, GitHubReleaseError } from "../github-releases.js"
 import { convertPullRequestToDraft, enqueuePullRequest, isMergeQueueRequired, readyPullRequest } from "../merge-queue.js"
 import { errorMessage, failure, json, success, type NextAction } from "../response.js"
 
@@ -1172,6 +1173,90 @@ export const mergePrCmd = Command.make(
       ),
     ),
 ).pipe(Command.withDescription("Merge a pull request as ShitRat"))
+
+const releaseDryRunOption = Options.boolean("dry-run").pipe(
+  Options.withDescription("Preview after read-only preflight (the default); never create a tag or release"),
+)
+const releaseYesOption = Options.boolean("yes").pipe(
+  Options.withDescription("Confirm this tag or release write; cannot be combined with --dry-run"),
+)
+const releaseWriteFailure = (command: string, error: unknown, code: string) =>
+  Effect.gen(function* () {
+    process.exitCode = 1
+    yield* printFailure(command, error, error instanceof GitHubReleaseError ? error.code : code,
+      "Verify repository Contents: write access and the inputs. Inspect existing tags/releases before retrying; no rollback is attempted.",
+      [{ command: "status <repo>", description: "Check the App's repository access" }])
+  })
+
+export const tagCmd = Command.make(
+  "tag",
+  {
+    repo: repoArg,
+    name: Options.text("name").pipe(Options.withDescription("New tag name (not a full ref)")),
+    target: Options.text("target").pipe(Options.withDescription("Existing full 40-character commit SHA")),
+    message: Options.text("message").pipe(Options.withDescription("Annotation; defaults to the tag name"), Options.optional),
+    dryRun: releaseDryRunOption, yes: releaseYesOption,
+  },
+  ({ repo, name, target, message, dryRun, yes }) =>
+    Effect.gen(function* () {
+      if (dryRun && yes) return yield* Effect.fail(new GitHubReleaseError("INVALID_CONFIRMATION", "Use either --dry-run or --yes, not both."))
+      const repoRef = yield* Effect.try({ try: () => parseRepo(repo), catch: toError })
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const result = yield* Effect.tryPromise({
+        try: () => createAnnotatedTag(octokit, repoRef, { name, target, message: optionToUndefined(message) }, !yes),
+        catch: toError,
+      })
+      yield* printSuccess(`tag ${repoRef.fullName}`, {
+        ...result, repo: repoRef.fullName, dry_run: !yes, github_write: result.created,
+        actor: "shitratgit[bot]", installation_id: token.installationId,
+      }, [...(!result.created ? [{
+        command: "tag <repo> --name <name> --target <target> --message <message> --yes",
+        description: "Create this annotated tag only after approving the preview; existing tags are refused",
+        params: { repo: { value: repoRef.fullName }, name: { value: name }, target: { value: target }, message: { value: optionToUndefined(message) ?? name } },
+      }] : []), {
+        command: "release <repo> --tag <tag> --dry-run",
+        description: "Preview a release once the tag exists",
+        params: { repo: { value: repoRef.fullName }, tag: { value: name } },
+      }])
+    }).pipe(Effect.catchAll((error) => releaseWriteFailure(`tag ${repo}`, error, "TAG_FAILED"))),
+).pipe(Command.withDescription("Create an annotated tag as ShitRat; dry-run by default, never overwrite"))
+
+export const releaseCmd = Command.make(
+  "release",
+  {
+    repo: repoArg,
+    tag: Options.text("tag").pipe(Options.withDescription("Existing tag; never created implicitly")),
+    title: Options.text("title").pipe(Options.withDescription("Release title; defaults to the tag name"), Options.optional),
+    notesFile: Options.text("notes-file").pipe(Options.withDescription("Path to release notes"), Options.optional),
+    generateNotes: Options.boolean("generate-notes").pipe(Options.withDescription("Ask GitHub to generate release notes on creation")),
+    draft: Options.boolean("draft"), prerelease: Options.boolean("prerelease"),
+    dryRun: releaseDryRunOption, yes: releaseYesOption,
+  },
+  ({ repo, tag, title, notesFile, generateNotes, draft, prerelease, dryRun, yes }) =>
+    Effect.gen(function* () {
+      if (dryRun && yes) return yield* Effect.fail(new GitHubReleaseError("INVALID_CONFIRMATION", "Use either --dry-run or --yes, not both."))
+      const file = optionToUndefined(notesFile)
+      if (file !== undefined && generateNotes) return yield* Effect.fail(new GitHubReleaseError("INVALID_RELEASE_NOTES", "Use either --notes-file or --generate-notes, not both."))
+      const notes = file === undefined ? undefined : yield* Effect.tryPromise({ try: () => Bun.file(file).text(), catch: toError })
+      const repoRef = yield* Effect.try({ try: () => parseRepo(repo), catch: toError })
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
+      const result = yield* Effect.tryPromise({
+        try: () => createGitHubRelease(octokit, repoRef, { tag, title: optionToUndefined(title), notes, generateNotes, draft, prerelease }, !yes),
+        catch: toError,
+      })
+      yield* printSuccess(`release ${repoRef.fullName}`, {
+        ...result, repo: repoRef.fullName, dry_run: !yes, github_write: result.created,
+        actor: "shitratgit[bot]", installation_id: token.installationId,
+      }, [{
+        command: result.created ? "status <repo>" : `release <repo> --tag <tag> --title <title>${file === undefined ? "" : " --notes-file <notes-file>"}${generateNotes ? " --generate-notes" : ""}${draft ? " --draft" : ""}${prerelease ? " --prerelease" : ""} --yes`,
+        description: result.created ? "Check repository access after release creation" : "Create this release only after approving the preview",
+        params: result.created ? { repo: { value: repoRef.fullName } } : {
+          repo: { value: repoRef.fullName }, tag: { value: tag }, title: { value: optionToUndefined(title) ?? tag },
+          ...(file === undefined ? {} : { "notes-file": { value: file } }),
+        },
+      }])
+    }).pipe(Effect.catchAll((error) => releaseWriteFailure(`release ${repo}`, error, "RELEASE_FAILED"))),
+).pipe(Command.withDescription("Create a GitHub release for an existing tag; dry-run by default"))
 
 export const readyPrCmd = Command.make(
   "ready-pr",
