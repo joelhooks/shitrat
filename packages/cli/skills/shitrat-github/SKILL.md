@@ -1,6 +1,6 @@
 ---
 name: shitrat-github
-description: Post GitHub issue comments, inline PR review replies, PR reviews, edit pull requests, and small file commits as the ShitRat GitHub App (`shitratgit[bot]`) instead of Joel. Use when reviewing PRs, replying to review threads, updating PR metadata, commenting on issues, doing smoke tests, committing repo files through the GitHub API, or any workflow where GitHub authorship should be ShitRat.
+description: Post GitHub issue comments, inline PR review replies, PR reviews, edit pull requests, small file commits, annotated tags, and releases as the ShitRat GitHub App (`shitratgit[bot]`) instead of Joel. Use when reviewing PRs, replying to review threads, updating PR metadata, commenting on issues, doing smoke tests, committing repo files through the GitHub API, or any workflow where GitHub authorship should be ShitRat.
 ---
 
 # ShitRat GitHub
@@ -17,6 +17,9 @@ shitrat comment skillrecordings/migrate-egghead 26 --body-file comment.md
 shitrat review skillrecordings/egghead-next 1608 --event REQUEST_CHANGES --body-file review.md
 shitrat reply skillrecordings/egghead-next 1608 123456 --body-file reply.md
 shitrat edit-pr skillrecordings/egghead-next 1608 --title "fix: clearer title" --body-file pr.md --base main --state open
+shitrat tag example/project --name v0.1.0 --target aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --message "Release v0.1.0" --dry-run
+shitrat release example/project --tag v0.1.0 --title "First release" --notes-file notes.md --dry-run
+shitrat release example/project --tag v0.1.0 --generate-notes --draft --prerelease --dry-run
 shitrat ready-pr badass-courses/drovr 698 --dry-run
 shitrat enqueue-pr badass-courses/drovr 696 --dry-run
 shitrat convert-to-draft badass-courses/drovr 696 --dry-run
@@ -49,6 +52,9 @@ If the pi extension is loaded, prefer the tools:
 - Do not use Joel's `gh pr review` when the desired actor is ShitRat.
 - Use `shitrat reply` / `shitrat_reply` for inline review threads; `comment` posts to the PR conversation, not an inline thread.
 - Use `shitrat edit-pr` / `shitrat_edit_pr` to update a PR's title, body, base, or open/closed state instead of `gh pr edit`.
+- Use `shitrat tag` and `shitrat release` instead of Joel-authenticated tag/release tools. Both default to dry-run, read preflight state, and require `--yes` for writes; do not combine it with `--dry-run`. Get approval for the exact preview before confirming. Smoke only with `--dry-run`, never a real tag or release.
+- `tag` requires a full existing commit SHA and creates only an annotated tag and a new ref. It refuses every existing tag, even the same target with different notes. Its preview's `<created-tag-object-sha>` is a reference to the annotation response, not the commit SHA. `release` requires an existing tag and refuses duplicate releases, including drafts. `--notes-file` and `--generate-notes` are mutually exclusive; `--draft` and `--prerelease` are independent.
+- Keep tag changes serialized with release creation: GitHub has no atomic require-existing-tag precondition, so a deletion after the final recheck can race the release API. Both commands read back writes and exit nonzero on refusal or mismatch. Failures never trigger rollback; inspect tags/releases before retrying. Do not add App permissions or fall back to Joel's credentials.
 - Use `shitrat ready-pr` instead of `gh pr ready` to take a pull request out of draft.
 - On a branch with a merge queue, `merge-pr` fails with `MERGE_QUEUE_REQUIRED`; use `shitrat enqueue-pr`, which queues the head it read (`expectedHeadOid`) and reports the queue position and state. The queue's ruleset decides the merge method.
 - To hold a pull request as ShitRat, use `shitrat label --add` (the repo's hold label, e.g. `NO MERGE`), `shitrat set-status --state failure` on its head sha, or `shitrat convert-to-draft`, which also drops it from the merge queue. `label --add` refuses a label the repo lacks, so a typo cannot mint a new label.

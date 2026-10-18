@@ -63,6 +63,15 @@ bun run src/cli.ts reply skillrecordings/egghead-next 1608 123456 --body-file re
 # Edit a pull request's title, body, base branch, or state as shitratgit[bot]
 bun run src/cli.ts edit-pr skillrecordings/egghead-next 1608 --title "fix: clearer title" --body-file pr.md --base main --state open
 
+# Preview an annotated tag; --target must be a full existing commit SHA. Default is dry-run.
+bun run src/cli.ts tag example/project --name v0.1.0 --target aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --message "Release v0.1.0" --dry-run
+
+# Preview a release; the tag must already exist. Default is dry-run.
+bun run src/cli.ts release example/project --tag v0.1.0 --title "First release" --notes-file notes.md --dry-run
+# Alternative: ask GitHub to generate notes; --draft and --prerelease are optional.
+bun run src/cli.ts release example/project --tag v0.1.0 --generate-notes --draft --prerelease --dry-run
+# For either command, replace --dry-run with --yes only after approving the payload.
+
 # Mark a draft pull request ready for review as shitratgit[bot]; --dry-run reads it and writes nothing
 bun run src/cli.ts ready-pr badass-courses/drovr 698 --dry-run
 
@@ -145,6 +154,18 @@ bun run src/cli.ts merge-pr joelhooks/shitrat-cli 123 --method squash
 # Inspect an X Article payload without contacting X
 bun run src/cli.ts x article draft --title "The past blocked the future" --html-file ./post.html --dry-run
 ```
+
+## Tags and releases
+
+`tag` and `release` authenticate as the App and read GitHub during preflight. Without `--yes`, they only preview repository writes. `--dry-run` and `--yes` are mutually exclusive. Both commands need repository access; writes need Contents: write permission. They return the JSON envelope and exit nonzero on refusal or read-back failure.
+
+`tag` creates an annotated tag object, then a **new** `refs/tags/<name>` ref. It never updates or deletes a ref. Existing lightweight and annotated tags are refused, regardless of target or annotation. The default annotation is the tag name. The preview contains `tag_object_payload` and `ref_payload`; `<created-tag-object-sha>` in the latter denotes the first API response, not the commit SHA. The tagger timestamp is fixed when each command starts its tag operation, so a later invocation has a new timestamp. Successful creation reads back the ref, annotation, and commit target.
+
+`release` checks that the tag exists and refuses an existing release for that tag, including drafts across all result pages. `--title` defaults to the tag name. Use either `--notes-file` or `--generate-notes`, not both. Generated notes are requested only on confirmed creation, not during preview. After creation, the command reads the release back by ID, which also works for drafts.
+
+Keep tag changes serialized with release creation. The command rechecks the tag immediately before creating the release and refuses a disappeared or changed ref. GitHub's release endpoint has no atomic require-existing-tag option: a concurrent deletion after that final read remains a service-side race. The command sends neither a tag-creation request nor `target_commitish`.
+
+Neither command retries or rolls back writes. If a second request or read-back fails, inspect repository state before retrying. Tag creation can leave an unreferenced annotation object, and a read-back failure can leave a real tag or release. Smoke tests must use `--dry-run`; the regression suite uses fake HTTP only.
 
 ## Commit doctrine
 

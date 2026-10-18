@@ -41,6 +41,8 @@ import {
   runLogCmd,
   setStatusCmd,
   statusCmd,
+  tagCmd,
+  releaseCmd,
 } from "./commands/github.js"
 import { runnerGroupCmd, runnersCmd, runnerTokenCmd, runnerTokenInvoked } from "./commands/runners.js"
 import { inboxCmd } from "./commands/inbox.js"
@@ -77,6 +79,8 @@ const root = Command.make("shitrat", {}, () =>
                 "shitrat create-pr <owner/repo> --title <title> --head <branch> --base main --body-file <path>",
               merge_pr:
                 "shitrat merge-pr <owner/repo> <pull-number> --method squash --dry-run",
+              tag: "shitrat tag <owner/repo> --name <tag> --target <full-sha> [--message <text>] [--dry-run|--yes]",
+              release: "shitrat release <owner/repo> --tag <tag> [--title <title>] [--notes-file <path>|--generate-notes] [--draft] [--prerelease] [--dry-run|--yes]",
               ready_pr: "shitrat ready-pr <owner/repo> <pull-number> [--dry-run]",
               enqueue_pr: "shitrat enqueue-pr <owner/repo> <pull-number> [--method merge|squash|rebase] [--dry-run]",
               convert_to_draft: "shitrat convert-to-draft <owner/repo> <pull-number> [--dry-run]",
@@ -207,6 +211,14 @@ const root = Command.make("shitrat", {}, () =>
               },
             },
             {
+              command: "tag <repo> --name <tag> --target <full-sha> [--message <text>] [--dry-run|--yes]",
+              description: "Preview an annotated tag; --yes creates it, existing tags are refused",
+            },
+            {
+              command: "release <repo> --tag <tag> [--title <title>] [--notes-file <path>|--generate-notes] [--draft] [--prerelease] [--dry-run|--yes]",
+              description: "Preview a release for an existing tag; --yes creates it",
+            },
+            {
               command: "ready-pr <repo> <number> [--dry-run]",
               description: "Mark a draft pull request ready for review as ShitRat",
               params: {
@@ -289,6 +301,8 @@ const root = Command.make("shitrat", {}, () =>
     createPrCmd,
     mergePrCmd,
     readyPrCmd,
+    tagCmd,
+    releaseCmd,
     enqueuePrCmd,
     convertToDraftCmd,
     labelCmd,
