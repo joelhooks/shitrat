@@ -1,18 +1,19 @@
 import { Octokit } from "@octokit/rest"
 import { describe, expect, test } from "bun:test"
-import { ensureRunnerGroup, listOrgRunners, listRunnerGroups, registrationToken, RunnerApiError } from "../src/org-runners.js"
+import { ensureRunnerGroup, listOrgRunners, listRepoRunners, removeRepoRunner, listRunnerGroups, registrationToken, RunnerApiError } from "../src/org-runners.js"
 
 const repo = { id: 42, full_name: "example/project", private: true }
 const group = { id: 7, name: "isolated", visibility: "selected", allows_public_repositories: false }
 const runner = { id: 10, name: "ci-1", status: "online", busy: false, labels: [{ name: "linux" }] }
 type Reply = { body?: unknown; status?: number; headers?: Record<string, string> }
-const github = (routes: Record<string, Reply>) => {
+const github = (routes: Record<string, Reply | Reply[]>) => {
   const calls: { route: string; body: unknown }[] = []
   const fetch = async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url)
     const route = `${init?.method ?? "GET"} ${url.pathname}${url.search}`
     calls.push({ route, body: init?.body ? JSON.parse(String(init.body)) : undefined })
-    const reply = routes[route] ?? { status: 404, body: { message: "Unexpected route" } }
+    const replies = routes[route]
+    const reply = (Array.isArray(replies) ? replies.shift() : replies) ?? { status: 404, body: { message: "Unexpected route" } }
     const response = new Response(reply.status === 204 ? null : JSON.stringify(reply.body ?? {}), { status: reply.status ?? 200, headers: { "content-type": "application/json", "x-ratelimit-remaining": "4999", ...reply.headers } })
     Object.defineProperty(response, "url", { value: url.href })
     return response
@@ -182,7 +183,7 @@ describe("runner-group workflow restrictions", () => {
 
 describe("runner command adapters", () => {
   // Isolate module mocks in a child, with only fake HTTP and no credentials.
-  const run = async (command: "runner-group" | "runner-groups", args: string[], routes = base(true)) => {
+  const run = async (command: "runner-group" | "runner-groups" | "runners" | "runner-remove", args: string[], routes: Record<string, Reply | Reply[]> = base(true)) => {
     const script = `
       import { mock } from "bun:test";
       import { Octokit } from "@octokit/rest";
@@ -192,9 +193,14 @@ describe("runner command adapters", () => {
       const github = ${github.toString()};
       const gh = github(${JSON.stringify(routes)});
       globalThis.fetch = () => { throw new Error("live HTTP forbidden"); };
-      mock.module("./src/org-runners.ts", () => ({ ...real, createOrgOctokit: () => Effect.succeed(gh.octokit) }));
+      const args = ${JSON.stringify(args)};
+      const expectedOwner = args.includes("--org") ? args[args.indexOf("--org") + 1] : args[args.indexOf("--repo") + 1]?.split("/")[0];
+      mock.module("./src/org-runners.ts", () => ({ ...real, createOrgOctokit: (owner) => {
+        if (owner !== expectedOwner) throw new Error("wrong installation owner");
+        return Effect.succeed(gh.octokit);
+      } }));
       const commands = await import("./src/commands/runners.ts");
-      const cmd = commands.${command === "runner-group" ? "runnerGroupCmd" : "runnerGroupsCmd"};
+      const cmd = commands.${({ "runner-group": "runnerGroupCmd", "runner-groups": "runnerGroupsCmd", runners: "runnersCmd", "runner-remove": "runnerRemoveCmd" })[command]};
       await Effect.runPromise(Command.run(cmd, { name: "test", version: "0" })(["bun", "test", ...${JSON.stringify(args)}]));
       console.error(JSON.stringify(gh.calls));
     `
@@ -214,6 +220,37 @@ describe("runner command adapters", () => {
     expect(conflict.exitCode).toBe(1)
     expect(conflict.stdout).toContain("mutually exclusive")
     expect(conflict.stderr.trim()).toBe("[]")
+  })
+  test("runners requires exactly one scope before HTTP", async () => {
+    for (const args of [[], ["--org", "example", "--repo", "example/project"], ["--repo", "example/project", "--group", "isolated"]]) {
+      const result = await run("runners", args, {})
+      expect(result.exitCode).toBe(1)
+      expect(JSON.parse(result.stdout).ok).toBe(false)
+      expect(result.stderr.trim()).toBe("[]")
+    }
+  })
+  test("runners --repo parses the scope and lists safe fields", async () => {
+    const result = await run("runners", ["--repo", "example/project"], {
+      "GET /repos/example/project/actions/runners?per_page=100": { body: { total_count: 1, runners: [{ ...runner, os: "linux" }] } },
+    })
+    expect(result.exitCode).toBe(0)
+    expect(JSON.parse(result.stdout).result).toMatchObject({ repo: "example/project", count: 1, runners: [{ id: 10, os: "linux" }] })
+  })
+  test("runner-remove fixture dry-run parses the requested command without DELETE", async () => {
+    const result = await run("runner-remove", ["--repo", "badass-courses/front-desk", "--id", "21", "--dry-run"], {
+      "GET /repos/badass-courses/front-desk/actions/runners/21": { body: { ...runner, id: 21, name: "retired-fixture", status: "offline" } },
+    })
+    expect(result.exitCode).toBe(0)
+    expect(JSON.parse(result.stdout).result).toEqual({ repo: "badass-courses/front-desk", id: 21, name: "retired-fixture", status: "offline", removed: false, alreadyAbsent: false, dry_run: true, request: { method: "DELETE", endpoint: "/repos/badass-courses/front-desk/actions/runners/21" } })
+    expect(JSON.parse(result.stderr)).toEqual([{ route: "GET /repos/badass-courses/front-desk/actions/runners/21" }])
+    if (process.env.RUNNER_FIXTURE_OUTPUT) await Bun.write(process.env.RUNNER_FIXTURE_OUTPUT, result.stdout)
+  })
+  test("runner-remove rejects invalid ids before HTTP", async () => {
+    for (const id of ["0", "-1"]) {
+      const result = await run("runner-remove", ["--repo", "example/project", "--id", id], {})
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr.trim()).toBe("[]")
+    }
   })
   test("runner-groups parses the name filter and missing names fail", async () => {
     const result = await run("runner-groups", ["--org", "example", "--name", "isolated"])
@@ -294,6 +331,107 @@ test("registration token accepts GitHub's documented token alphabet", async () =
   const expires_at = new Date(Date.now() + 60 * 60 * 1000).toISOString()
   const gh = github({ "POST /orgs/example/actions/runners/registration-token": { body: { token, expires_at } } })
   expect(await registrationToken(gh.octokit, "example")).toEqual({ token, expires_at })
+})
+
+describe("repository runners", () => {
+  const collection = "GET /repos/example/project/actions/runners?per_page=100"
+  const single = "GET /repos/example/project/actions/runners/10"
+  const deletion = "DELETE /repos/example/project/actions/runners/10"
+  const offline = { ...runner, os: "linux", status: "offline" }
+  const removeInput = { repo: "example/project", id: 10, dryRun: false }
+  const absent = { status: 404, body: { message: "Not Found" } }
+  const empty = { body: { total_count: 0, runners: [] } }
+  const removedRoutes = (): Record<string, Reply | Reply[]> => ({
+    [single]: [{ body: offline }, absent],
+    [deletion]: { status: 204 },
+    [collection]: empty,
+  })
+  test("repo list paginates and returns only safe fields with optional group id", async () => {
+    const gh = github({
+      [collection]: { body: { total_count: 2, runners: [{ ...offline, runner_group_id: 7, sensitive: "never output" }] }, headers: { link: '<https://api.github.com/repos/example/project/actions/runners?per_page=100&page=2>; rel="next"' } },
+      [`${collection}&page=2`]: { body: { total_count: 2, runners: [{ ...offline, id: 11 }] } },
+    })
+    expect(await listRepoRunners(gh.octokit, "example/project")).toEqual([
+      { id: 10, name: "ci-1", os: "linux", status: "offline", busy: false, labels: ["linux"], runner_group_id: 7 },
+      { id: 11, name: "ci-1", os: "linux", status: "offline", busy: false, labels: ["linux"] },
+    ])
+    expect(gh.calls.map(({ route }) => route)).toEqual([collection, `${collection}&page=2`])
+  })
+  test("removes offline idle runner only after read, DELETE and verified 404 readback", async () => {
+    const gh = github(removedRoutes())
+    expect(await removeRepoRunner(gh.octokit, removeInput)).toEqual({ repo: "example/project", id: 10, name: "ci-1", status: "offline", removed: true, alreadyAbsent: false, readback: { single: 404, listed: false } })
+    expect(gh.calls.map(({ route }) => route)).toEqual([single, deletion, single, collection])
+  })
+  for (const live of [{ status: "online", busy: false }, { status: "offline", busy: true }]) test(`refuses ${JSON.stringify(live)} without DELETE`, async () => {
+    const gh = github({ [single]: { body: { ...offline, ...live } } })
+    await expect(removeRepoRunner(gh.octokit, removeInput)).rejects.toThrow("online or busy")
+    expect(gh.calls.map(({ route }) => route)).toEqual([single])
+    expect(writes(gh.calls)).toEqual([])
+  })
+  test("already absent verifies repo visibility and sends no DELETE", async () => {
+    const gh = github({ [single]: absent, [collection]: empty })
+    expect(await removeRepoRunner(gh.octokit, removeInput)).toEqual({ repo: "example/project", id: 10, name: null, status: null, removed: false, alreadyAbsent: true, readback: { single: 404, listed: false } })
+    expect(gh.calls.map(({ route }) => route)).toEqual([single, collection])
+    expect(writes(gh.calls)).toEqual([])
+  })
+  test("dry-run reads once and reports the DELETE without sending it", async () => {
+    const gh = github(removedRoutes())
+    expect(await removeRepoRunner(gh.octokit, { ...removeInput, dryRun: true })).toEqual({ repo: "example/project", id: 10, name: "ci-1", status: "offline", removed: false, alreadyAbsent: false, dry_run: true, request: { method: "DELETE", endpoint: "/repos/example/project/actions/runners/10" } })
+    expect(gh.calls.map(({ route }) => route)).toEqual([single])
+    expect(writes(gh.calls)).toEqual([])
+  })
+  test("runner still present on readback is a mismatch, not success", async () => {
+    const gh = github({ ...removedRoutes(), [single]: { body: offline } })
+    await expect(removeRepoRunner(gh.octokit, removeInput)).rejects.toThrow("readback mismatch")
+    expect(gh.calls.map(({ route }) => route)).toEqual([single, deletion, single])
+  })
+  for (const status of [403, 500]) test(`readback GET ${status} is a sanitized mismatch, not success`, async () => {
+    const gh = github({ ...removedRoutes(), [single]: [{ body: offline }, { status, body: { message: "sensitive fixture response" } }] })
+    const error = await removeRepoRunner(gh.octokit, removeInput).catch((error: unknown) => error)
+    expect(error).toBeInstanceOf(RunnerApiError)
+    expect(String(error)).toContain("readback mismatch")
+    expect(String(error)).toContain(`GET /repos/{owner}/{repo}/actions/runners/{runner_id}: HTTP ${status}`)
+    expect(String(error)).not.toContain("sensitive fixture response")
+    expect(gh.calls.map(({ route }) => route)).toEqual([single, deletion, single])
+  })
+  test("DELETE 403 names administration, sanitizes the refusal and never retries", async () => {
+    const gh = github({ ...removedRoutes(), [deletion]: { status: 403, body: { message: "sensitive fixture response" } } })
+    const error = await removeRepoRunner(gh.octokit, removeInput).catch((error: unknown) => error)
+    expect(error).toBeInstanceOf(RunnerApiError)
+    expect(String(error)).toContain("DELETE /repos/{owner}/{repo}/actions/runners/{runner_id}: HTTP 403")
+    expect(String(error)).toContain("administration: write")
+    expect(String(error)).not.toContain("sensitive fixture response")
+    expect(gh.calls.map(({ route }) => route)).toEqual([single, deletion])
+  })
+  for (const stage of ["initial", "readback"]) for (const status of [403, 404]) test(`${stage} single GET 404 plus list ${status} fails, not absence`, async () => {
+    const gh = github({ ...removedRoutes(), [single]: stage === "initial" ? absent : [{ body: offline }, absent], [collection]: { status, body: { message: "sensitive fixture response" } } })
+    const error = await removeRepoRunner(gh.octokit, removeInput).catch((error: unknown) => error)
+    expect(error).toBeInstanceOf(RunnerApiError)
+    expect(String(error)).toContain(`GET /repos/{owner}/{repo}/actions/runners: HTTP ${status}`)
+    expect(String(error)).toContain("administration: read")
+    expect(String(error)).not.toContain("sensitive fixture response")
+    expect(writes(gh.calls)).toHaveLength(stage === "initial" ? 0 : 1)
+  })
+  for (const stage of ["initial", "readback"]) test(`${stage} single GET 404 with runner on list page 2 is a mismatch`, async () => {
+    const gh = github({ ...removedRoutes(), [single]: stage === "initial" ? absent : [{ body: offline }, absent],
+      [collection]: { ...empty, headers: { link: '<https://api.github.com/repos/example/project/actions/runners?per_page=100&page=2>; rel="next"' } },
+      [`${collection}&page=2`]: { body: { total_count: 1, runners: [offline] } },
+    })
+    await expect(removeRepoRunner(gh.octokit, removeInput)).rejects.toThrow("readback mismatch")
+    expect(writes(gh.calls)).toHaveLength(stage === "initial" ? 0 : 1)
+  })
+  test("invalid runner ids fail before HTTP", async () => {
+    for (const id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const gh = github({})
+      await expect(removeRepoRunner(gh.octokit, { ...removeInput, id })).rejects.toThrow("positive safe integer")
+      expect(gh.calls).toEqual([])
+    }
+  })
+  test("single GET 403 fails before DELETE", async () => {
+    const gh = github({ [single]: { status: 403 } })
+    await expect(removeRepoRunner(gh.octokit, removeInput)).rejects.toThrow("administration: read")
+    expect(gh.calls.map(({ route }) => route)).toEqual([single])
+  })
 })
 
 test("registration token rejects invalid token syntax without including it in errors", async () => {

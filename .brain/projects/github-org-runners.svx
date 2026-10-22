@@ -23,6 +23,16 @@ Workflow policy writes that return 403 or 422 fail with sanitized endpoint/statu
 
 `runners --org <org> [--group <name>]` reads runners and their group membership. All collection reads follow GitHub pagination. A missing named group fails instead of silently returning an empty list.
 
+## Repository runner reads and removal
+
+`runners --repo <owner/repo>` reads repository-level runners through the owner's installation, using existing repository `administration` access. It paginates and returns only runner identity, OS, status, busy flag, label names and an optional group id. Exactly one of `--org` or `--repo` is required; `--group` remains organization-only.
+
+`runner-remove --repo <owner/repo> --id <positive-integer> [--dry-run]` follows read → refuse live, verify absent, preview, or delete → verify absent. Online or busy runners refuse without DELETE. Dry-run reads and reports the intended DELETE without sending it. Deletion sends one request and requires GET 404 plus a successful paginated repository runner list without that id. Initial absence uses the same two-read proof and returns `removed: false, alreadyAbsent: true` without DELETE. Absence output records `readback: { single: 404, listed: false }`.
+
+A single-runner 404 cannot distinguish absence from GitHub's permission masking. On that response only, the list checks repository runner access and absence across every page. A list 403 or 404 fails with endpoint, status and `administration` permission context. A listed runner contradicting a single-runner 404 is a mismatch. Refusals never retry or change App permissions. A failed post-delete read does not prove the write failed; inspect before retrying. Keep the runner stopped because read and DELETE are separate GitHub requests, not an atomic idle check.
+
+Fake-HTTP tests cover pagination, scope validation, safe output, offline removal, online/busy refusal, already absent, dry-run, readback mismatch, DELETE 403, and ambiguous 404 permission checks. Mutation checks remove the online guard, skip readback, swallow DELETE 403, send DELETE during dry-run, and skip the 404 list proof; each must fail tests before restoration. No live runner operations belong in these tests.
+
 ## Registration expiry validation
 
 GitHub's [registration-token example](https://docs.github.com/en/rest/actions/self-hosted-runners#create-a-registration-token-for-an-organization) includes fractional seconds and a timezone offset. The initial whole-second `Z`-only check rejected that valid response shape. A matching CLI fixture reproduced the failure without live credentials.

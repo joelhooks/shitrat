@@ -7,8 +7,8 @@ export class RunnerApiError extends Error {
   constructor(readonly endpoint: string, readonly status?: number, readonly permission = "organization_self_hosted_runners: write", workflowRestriction = false) {
     super(workflowRestriction
       ? `${endpoint}: ${status ? `HTTP ${status}` : "request failed"}; workflow restriction not available for this group or plan`
-      : status === 403
-      ? `${endpoint}: HTTP 403; requires ${permission}. Stop; do not change app permissions.`
+      : status === 403 || (status === 404 && permission.startsWith("administration:"))
+      ? `${endpoint}: HTTP ${status}; requires ${permission}. Stop; do not change app permissions.`
       : `${endpoint}: ${status ? `HTTP ${status}` : "request failed"}`)
   }
 }
@@ -139,6 +139,51 @@ export const listRunnerGroups = async (octokit: GitHubOctokit, org: string, name
     })
   }
   return result
+}
+
+// Repo runners use the owner's installation client, not organization runner permissions.
+export const listRepoRunners = async (octokit: GitHubOctokit, repo: string) => {
+  const ref = parseRepo(repo)
+  const runners = await runnerApiCall("GET /repos/{owner}/{repo}/actions/runners", () =>
+    octokit.paginate(octokit.rest.actions.listSelfHostedRunnersForRepo, { owner: ref.owner, repo: ref.repo, per_page: 100 }), "administration: read")
+  return runners.map(({ id, name, os, status, busy, labels, ...rest }) => ({
+    id, name, os, status, busy, labels: labels.map(({ name }) => name),
+    ...("runner_group_id" in rest ? { runner_group_id: rest.runner_group_id } : {}),
+  }))
+}
+
+// Lifecycle: read -> refuse live | verify absent | preview | delete -> verify absent.
+// A runner GET 404 alone is ambiguous: GitHub also masks missing permissions as 404.
+export const removeRepoRunner = async (octokit: GitHubOctokit, input: { repo: string; id: number; dryRun: boolean }) => {
+  const { repo, id, dryRun } = input
+  if (!Number.isSafeInteger(id) || id <= 0) throw new RunnerApiError("--id must be a positive safe integer")
+  const ref = parseRepo(repo)
+  const params = { owner: ref.owner, repo: ref.repo, runner_id: id }
+  const endpoint = "/repos/{owner}/{repo}/actions/runners/{runner_id}"
+  const read = async () => {
+    try {
+      return (await runnerApiCall(`GET ${endpoint}`, () => octokit.rest.actions.getSelfHostedRunnerForRepo(params), "administration: read")).data
+    } catch (error) {
+      if (!(error instanceof RunnerApiError) || error.status !== 404) throw error
+      const runners = await listRepoRunners(octokit, repo)
+      if (runners.some((runner) => runner.id === id)) throw new RunnerApiError("runner removal readback mismatch: GET returned 404 but runner is still listed")
+      return null
+    }
+  }
+  const runner = await read()
+  const absentReadback = { single: 404, listed: false }
+  if (runner === null) return { repo, id, name: null, status: null, removed: false, alreadyAbsent: true, readback: absentReadback }
+  if (runner.status === "online" || runner.busy === true) throw new RunnerApiError("runner removal refused: runner is online or busy; wait until offline and idle, then read again")
+  const result = { repo, id, name: runner.name, status: runner.status, removed: false, alreadyAbsent: false }
+  if (dryRun) return { ...result, dry_run: true, request: { method: "DELETE", endpoint: `/repos/${ref.owner}/${ref.repo}/actions/runners/${id}` } }
+  await runnerApiCall(`DELETE ${endpoint}`, () => octokit.rest.actions.deleteSelfHostedRunnerFromRepo(params), "administration: write")
+  const saved = await read().catch((error: unknown) => {
+    // A successful DELETE is not proof of removal if verification cannot complete.
+    if (error instanceof RunnerApiError) throw new RunnerApiError(`runner removal readback mismatch: ${error.endpoint}`, error.status, error.permission)
+    throw new RunnerApiError("runner removal readback mismatch: request failed")
+  })
+  if (saved !== null) throw new RunnerApiError("runner removal readback mismatch: runner still exists")
+  return { ...result, removed: true, readback: absentReadback }
 }
 
 export const listOrgRunners = async (octokit: GitHubOctokit, org: string, groupName?: string) => {
