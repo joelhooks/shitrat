@@ -104,6 +104,12 @@ bun run src/cli.ts rerun badass-courses/drovr <run-id> --failed --dry-run
 bun run src/cli.ts runner-group --org example --name isolated --repo example/project --dry-run
 # Apply only after authorizing the runner group change.
 bun run src/cli.ts runner-group --org example --name isolated --repo example/project
+# Restrict workflow access too. Repeat --workflow for each allowed workflow/ref.
+bun run src/cli.ts runner-group --org example --name isolated --repo example/project --workflow example/project/.github/workflows/deploy.yml@refs/heads/main --dry-run
+# Undo only workflow restrictions, keeping the one-repository policy.
+bun run src/cli.ts runner-group --org example --name isolated --repo example/project --all-workflows --dry-run
+# Read group policy and selected repository names, optionally filtered by name.
+bun run src/cli.ts runner-groups --org example --name isolated
 # Read back org runners, optionally restricted to a group.
 bun run src/cli.ts runners --org example --group isolated
 # Mint an org registration token only when needed. Keep stdout on a private pipe;
@@ -154,6 +160,14 @@ bun run src/cli.ts merge-pr joelhooks/shitrat-cli 123 --method squash
 # Inspect an X Article payload without contacting X
 bun run src/cli.ts x article draft --title "The past blocked the future" --html-file ./post.html --dry-run
 ```
+
+### Runner group workflow policy
+
+`runner-group --workflow` accepts only workflows owned by `--org`, using `.github/workflows/<file>.yml` or `.yaml` and a full `@refs/heads/<branch>` or `@refs/tags/<tag>` ref. Wildcards, bare branches and commit SHAs are refused. Repeat the flag to allow more workflows. Readback must match the exact requested workflow set, regardless of order.
+
+`--all-workflows` disables the workflow restriction and verifies that GitHub saved `false`. It cannot be combined with `--workflow`. Without either flag, workflow fields are omitted from requests and existing workflow restrictions stay untouched. Dry-run includes the intended workflow policy and performs no writes.
+
+A 403, 422 or read-only workflow policy fails with the endpoint, status and `workflow restriction not available for this group or plan`. There is no retry or repository-only fallback. Updates still use separate policy and repository-access requests, so failures can leave a partial change. Inspect with `runner-groups` before retrying. The read command paginates groups and selected repositories; a missing named group fails.
 
 ## Tags and releases
 
