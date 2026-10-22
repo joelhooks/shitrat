@@ -226,6 +226,23 @@ describe("runner command adapters", () => {
 })
 
 describe("runner-groups read", () => {
+  test("Default all-visibility group skips selected repositories endpoint", async () => {
+    const defaultGroup = { ...group, id: 8, name: "Default", default: true, visibility: "all" }
+    const gh = github({
+      ...base(true),
+      [groupsRoute]: { body: { total_count: 2, runner_groups: [defaultGroup, group] } },
+      "GET /orgs/example/actions/runner-groups/8/repositories?per_page=100": { status: 404, body: { message: "No selected repositories for an all-visibility group" } },
+    })
+    expect(await listRunnerGroups(gh.octokit, "example")).toMatchObject([
+      { id: 8, name: "Default", default: true, visibility: "all", repositories: "all" },
+      { id: 7, name: "isolated", visibility: "selected", repositories: ["example/project"] },
+    ])
+    expect(gh.calls.map(({ route }) => route)).toEqual([
+      groupsRoute,
+      `GET ${groupRoute}/repositories?per_page=100`,
+    ])
+    expect(writes(gh.calls)).toEqual([])
+  })
   test("returns policy and full repository names across both paginated collections without writes", async () => {
     const policy = { ...group, default: false, restricted_to_workflows: true, selected_workflows: [workflow], workflow_restrictions_read_only: false }
     const gh = github({

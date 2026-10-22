@@ -126,14 +126,16 @@ export const listRunnerGroups = async (octokit: GitHubOctokit, org: string, name
   if (name !== undefined && selected.length !== 1) throw new RunnerApiError("runner group not found or ambiguous")
   const result = []
   for (const group of selected) {
-    const repositories = await runnerApiCall("GET /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories", () =>
-      octokit.paginate("GET /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories", { org, runner_group_id: group.id, per_page: 100 }), "organization_self_hosted_runners: read")
+    const repositories = group.visibility === "selected"
+      ? (await runnerApiCall("GET /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories", () =>
+        octokit.paginate("GET /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories", { org, runner_group_id: group.id, per_page: 100 }), "organization_self_hosted_runners: read")).map(({ full_name }) => full_name)
+      : group.visibility
     result.push({
       id: group.id, name: group.name, visibility: group.visibility, default: group.default,
       allows_public_repositories: group.allows_public_repositories,
       restricted_to_workflows: group.restricted_to_workflows, selected_workflows: group.selected_workflows,
       workflow_restrictions_read_only: group.workflow_restrictions_read_only,
-      repositories: repositories.map(({ full_name }) => full_name),
+      repositories,
     })
   }
   return result
