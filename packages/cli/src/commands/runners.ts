@@ -1,7 +1,8 @@
 import { Command, Options } from "@effect/cli"
 import { Console, Effect, Option } from "effect"
 import { writeSync } from "node:fs"
-import { createOrgOctokit, ensureRunnerGroup, listOrgRunners, listRunnerGroups, runnerWorkflowPolicy, registrationToken, RunnerApiError } from "../org-runners.js"
+import { createOrgOctokit, ensureRunnerGroup, listOrgRunners, listRepoRunners, removeRepoRunner, listRunnerGroups, runnerWorkflowPolicy, registrationToken, RunnerApiError } from "../org-runners.js"
+import { parseRepo } from "../github-app.js"
 import { failure, json, success } from "../response.js"
 
 const orgOption = Options.text("org").pipe(Options.withDescription("GitHub organization with a ShitRat App installation"))
@@ -60,11 +61,38 @@ export const runnerGroupsCmd = Command.make("runner-groups", {
   .pipe(Command.withDescription("Read org runner groups, workflow policy and selected repositories"))
 
 export const runnersCmd = Command.make("runners", {
-  org: orgOption,
+  org: orgOption.pipe(Options.optional),
+  repo: Options.text("repo").pipe(Options.optional),
   group: Options.text("group").pipe(Options.optional),
-}, ({ org, group }) => Effect.gen(function* () {
-  const octokit = yield* createOrgOctokit(org)
-  const runners = yield* apiEffect(() => listOrgRunners(octokit, org, Option.getOrUndefined(group)))
-  yield* Console.log(json(success("runners", { org, count: runners.length, runners })))
+}, (options) => Effect.gen(function* () {
+  const org = Option.getOrUndefined(options.org)
+  const repo = Option.getOrUndefined(options.repo)
+  const group = Option.getOrUndefined(options.group)
+  if ((org === undefined) === (repo === undefined)) return yield* failureEffect("runners", new RunnerApiError("exactly one of --org or --repo is required; they are mutually exclusive"))
+  if (repo !== undefined && group !== undefined) return yield* failureEffect("runners", new RunnerApiError("--group requires --org; omit it for repo-level runners"))
+  const owner = yield* Effect.try({ try: () => repo === undefined ? org! : parseRepo(repo).owner, catch: (error) => error })
+  const octokit = yield* createOrgOctokit(owner)
+  const runners = repo === undefined
+    ? yield* apiEffect(() => listOrgRunners(octokit, org!, group))
+    : yield* apiEffect(() => listRepoRunners(octokit, repo))
+  yield* Console.log(json(success("runners", { ...(repo === undefined ? { org } : { repo }), count: runners.length, runners })))
 }).pipe(Effect.catchAll((error) => failureEffect("runners", error))))
-  .pipe(Command.withDescription("Read org runners, including labels and group membership"))
+  .pipe(Command.withDescription("Read organization or repository runners"))
+
+export const runnerRemoveCmd = Command.make("runner-remove", {
+  repo: Options.text("repo"),
+  id: Options.integer("id"),
+  dryRun: Options.boolean("dry-run"),
+}, (input) => Effect.gen(function* () {
+  const owner = yield* Effect.try({ try: () => {
+    if (!Number.isSafeInteger(input.id) || input.id <= 0) throw new RunnerApiError("--id must be a positive safe integer")
+    return parseRepo(input.repo).owner
+  }, catch: (error) => error })
+  const octokit = yield* createOrgOctokit(owner)
+  const result = yield* apiEffect(() => removeRepoRunner(octokit, input))
+  yield* Console.log(json(success("runner-remove", result, [{
+    command: `runners --repo ${input.repo}`,
+    description: "Read repository runners before any further action",
+  }])))
+}).pipe(Effect.catchAll((error) => failureEffect("runner-remove", error))))
+  .pipe(Command.withDescription("Remove an offline, idle repository runner and verify absence"))

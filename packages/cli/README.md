@@ -112,6 +112,12 @@ bun run src/cli.ts runner-group --org example --name isolated --repo example/pro
 bun run src/cli.ts runner-groups --org example --name isolated
 # Read back org runners, optionally restricted to a group.
 bun run src/cli.ts runners --org example --group isolated
+# Read repository-level runners (exactly one of --org or --repo is required).
+bun run src/cli.ts runners --repo example/project
+# Preview removal of an offline, idle repository runner. This still reads GitHub.
+bun run src/cli.ts runner-remove --repo example/project --id 10 --dry-run
+# Remove only after authorizing the deletion.
+bun run src/cli.ts runner-remove --repo example/project --id 10
 # Mint an org registration token only when needed. Keep stdout on a private pipe;
 # do not redirect it to a file/log or pass it through a child process argv.
 # A 403 names the endpoint and required permission; stop rather than adding permissions.
@@ -168,6 +174,14 @@ bun run src/cli.ts x article draft --title "The past blocked the future" --html-
 `--all-workflows` disables the workflow restriction and verifies that GitHub saved `false`. It cannot be combined with `--workflow`. Without either flag, workflow fields are omitted from requests and existing workflow restrictions stay untouched. Dry-run includes the intended workflow policy and performs no writes.
 
 A 403, 422 or read-only workflow policy fails with the endpoint, status and `workflow restriction not available for this group or plan`. There is no retry or repository-only fallback. Updates still use separate policy and repository-access requests, so failures can leave a partial change. Inspect with `runner-groups` before retrying. The read command paginates groups and selected repositories; a missing named group fails.
+
+### Repository runners
+
+`runners --repo <owner/repo>` uses the repository owner's App installation and paginates repository-level runners. It returns `id`, `name`, `os`, `status`, `busy`, label names and `runner_group_id` when GitHub provides it. Exactly one of `--org` or `--repo` is required. `--group` is only valid with `--org`; the existing organization read is unchanged.
+
+`runner-remove --repo <owner/repo> --id <positive-integer> [--dry-run]` reads first and proceeds only when `status` is exactly `"offline"` and `busy` is exactly `false`. Online, busy, unknown or missing state refuses without a DELETE and reports the observed status and busy values. Dry-run reports the intended DELETE without sending it. A confirmed removal sends one DELETE and requires a runner GET 404 plus a successful paginated list without that id. A runner GET 404 alone can also mean missing App permissions, so both initial absence and post-delete absence require that list check. Results report `readback: { single: 404, listed: false }`; an already absent runner returns `removed: false, alreadyAbsent: true` without a DELETE. Dry-run of a present runner has no readback field because no deletion was attempted.
+
+Requests use existing repository `administration` permissions. A 403 or permission-masked 404 fails with sanitized endpoint, status and permission context. There are no retries or permission changes. A readback failure after DELETE can mean deletion happened but could not be verified; inspect with `runners --repo` before retrying. The pre-delete read is not atomic with DELETE: keep the runner stopped while removing its registration.
 
 ## Tags and releases
 
