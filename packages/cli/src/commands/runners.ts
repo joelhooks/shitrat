@@ -1,7 +1,7 @@
 import { Command, Options } from "@effect/cli"
 import { Console, Effect, Option } from "effect"
 import { writeSync } from "node:fs"
-import { createOrgOctokit, ensureRunnerGroup, listOrgRunners, registrationToken, RunnerApiError } from "../org-runners.js"
+import { createOrgOctokit, ensureRunnerGroup, listOrgRunners, listRunnerGroups, runnerWorkflowPolicy, registrationToken, RunnerApiError } from "../org-runners.js"
 import { failure, json, success } from "../response.js"
 
 const orgOption = Options.text("org").pipe(Options.withDescription("GitHub organization with a ShitRat App installation"))
@@ -36,7 +36,10 @@ export const runnerGroupCmd = Command.make("runner-group", {
   name: Options.text("name"),
   repo: Options.text("repo"),
   dryRun: Options.boolean("dry-run"),
+  workflows: Options.text("workflow").pipe(Options.repeated),
+  allWorkflows: Options.boolean("all-workflows"),
 }, (input) => Effect.gen(function* () {
+  yield* Effect.try({ try: () => runnerWorkflowPolicy(input.org, input.workflows, input.allWorkflows), catch: (error) => error })
   const octokit = yield* createOrgOctokit(input.org)
   const result = yield* apiEffect(() => ensureRunnerGroup(octokit, input))
   yield* Console.log(json(success("runner-group", result, [{
@@ -45,6 +48,16 @@ export const runnerGroupCmd = Command.make("runner-group", {
   }])))
 }).pipe(Effect.catchAll((error) => failureEffect("runner-group", error))))
   .pipe(Command.withDescription("Create or restrict a runner group to exactly one private repository"))
+
+export const runnerGroupsCmd = Command.make("runner-groups", {
+  org: orgOption,
+  name: Options.text("name").pipe(Options.optional),
+}, ({ org, name }) => Effect.gen(function* () {
+  const octokit = yield* createOrgOctokit(org)
+  const groups = yield* apiEffect(() => listRunnerGroups(octokit, org, Option.getOrUndefined(name)))
+  yield* Console.log(json(success("runner-groups", { org, count: groups.length, groups })))
+}).pipe(Effect.catchAll((error) => failureEffect("runner-groups", error))))
+  .pipe(Command.withDescription("Read org runner groups, workflow policy and selected repositories"))
 
 export const runnersCmd = Command.make("runners", {
   org: orgOption,

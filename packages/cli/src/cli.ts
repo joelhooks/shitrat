@@ -44,7 +44,7 @@ import {
   tagCmd,
   releaseCmd,
 } from "./commands/github.js"
-import { runnerGroupCmd, runnersCmd, runnerTokenCmd, runnerTokenInvoked } from "./commands/runners.js"
+import { runnerGroupCmd, runnerGroupsCmd, runnersCmd, runnerTokenCmd, runnerTokenInvoked } from "./commands/runners.js"
 import { inboxCmd } from "./commands/inbox.js"
 import { xCmd } from "./commands/x.js"
 import { errorMessage, failure, json, success } from "./response.js"
@@ -93,6 +93,7 @@ const root = Command.make("shitrat", {}, () =>
               rerun: "shitrat rerun <owner/repo> <run-id> [--failed] [--dry-run]",
               runner_token: "shitrat runner-token --org <org> (token-only stdout; expiry on stderr)",
               runner_group: "shitrat runner-group --org <org> --name <name> --repo <owner/repo> [--dry-run]",
+              runner_groups: "shitrat runner-groups --org <org> [--name <name>]",
               runners: "shitrat runners --org <org> [--group <name>]",
               install:
                 "shitrat install pi|claude|codex-desktop --dry-run",
@@ -313,6 +314,7 @@ const root = Command.make("shitrat", {}, () =>
     rerunCmd,
     runnerTokenCmd,
     runnerGroupCmd,
+    runnerGroupsCmd,
     runnersCmd,
     editPrCmd,
     commitFileCmd,

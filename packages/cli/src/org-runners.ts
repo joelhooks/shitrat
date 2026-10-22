@@ -4,8 +4,10 @@ import { createInstallationToken, parseRepo, type GitHubOctokit } from "./github
 
 // Never retain an Octokit error: it can contain authorization headers or response tokens.
 export class RunnerApiError extends Error {
-  constructor(readonly endpoint: string, readonly status?: number, readonly permission = "organization_self_hosted_runners: write") {
-    super(status === 403
+  constructor(readonly endpoint: string, readonly status?: number, readonly permission = "organization_self_hosted_runners: write", workflowRestriction = false) {
+    super(workflowRestriction
+      ? `${endpoint}: ${status ? `HTTP ${status}` : "request failed"}; workflow restriction not available for this group or plan`
+      : status === 403
       ? `${endpoint}: HTTP 403; requires ${permission}. Stop; do not change app permissions.`
       : `${endpoint}: ${status ? `HTTP ${status}` : "request failed"}`)
   }
@@ -44,8 +46,39 @@ export const registrationToken = async (octokit: GitHubOctokit, org: string) => 
 const groups = (octokit: GitHubOctokit, org: string) => runnerApiCall("GET /orgs/{org}/actions/runner-groups", () =>
   octokit.paginate("GET /orgs/{org}/actions/runner-groups", { org, per_page: 100 }), "organization_self_hosted_runners: read")
 
-export const ensureRunnerGroup = async (octokit: GitHubOctokit, input: { org: string; name: string; repo: string; dryRun: boolean }) => {
+export const runnerWorkflowPolicy = (org: string, workflows: readonly string[] = [], allWorkflows = false) => {
+  if (workflows.length && allWorkflows) throw new RunnerApiError("--workflow and --all-workflows are mutually exclusive")
+  for (const workflow of workflows) {
+    const match = /^([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)\/\.github\/workflows\/([^/@\s]+\.ya?ml)@refs\/(heads|tags)\/(.+)$/.exec(workflow)
+    const ref = match?.[5]
+    if (!match || match[1]!.toLowerCase() !== org.toLowerCase() || /[\s*?\[\\~^:\x00-\x1f\x7f]/.test(workflow) || !ref || ref.includes("..") || ref.includes("@{") || ref.includes("//") || ref.includes("@") || ref.split("/").some((part) => !part || part.startsWith(".") || part.endsWith(".") || part.endsWith(".lock"))) {
+      throw new RunnerApiError("invalid --workflow: use owner/repo/.github/workflows/file.yml@refs/heads/branch or @refs/tags/tag in --org")
+    }
+  }
+  return workflows.length
+    ? { restricted_to_workflows: true, selected_workflows: [...new Set(workflows)] }
+    : allWorkflows ? { restricted_to_workflows: false } : {}
+}
+
+const workflowWritable = (group: { workflow_restrictions_read_only?: boolean }, endpoint: string, enabled: boolean) => {
+  if (enabled && group.workflow_restrictions_read_only === true) throw new RunnerApiError(endpoint, 200, undefined, true)
+}
+
+const groupPolicyCall = async <T>(endpoint: string, request: () => Promise<T>, workflowPolicy: boolean): Promise<T> => {
+  try {
+    return await runnerApiCall(endpoint, request)
+  } catch (error) {
+    if (workflowPolicy && error instanceof RunnerApiError && (error.status === 403 || error.status === 422)) {
+      throw new RunnerApiError(endpoint, error.status, undefined, true)
+    }
+    throw error
+  }
+}
+
+export const ensureRunnerGroup = async (octokit: GitHubOctokit, input: { org: string; name: string; repo: string; dryRun: boolean; workflows?: readonly string[]; allWorkflows?: boolean }) => {
   const { org, name, dryRun } = input
+  const workflowPolicy = runnerWorkflowPolicy(org, input.workflows, input.allWorkflows)
+  const changesWorkflows = workflowPolicy.restricted_to_workflows !== undefined
   const ref = parseRepo(input.repo)
   if (ref.owner.toLowerCase() !== org.toLowerCase()) throw new RunnerApiError("repository must belong to --org")
   const { data: repo } = await runnerApiCall("GET /repos/{owner}/{repo}", () => octokit.rest.repos.get({ owner: ref.owner, repo: ref.repo }), "repository metadata: read")
@@ -53,15 +86,17 @@ export const ensureRunnerGroup = async (octokit: GitHubOctokit, input: { org: st
   const found = (await groups(octokit, org)).filter((group) => group.name === name)
   if (found.length > 1) throw new RunnerApiError("ambiguous runner group name")
   const existing = found[0]
-  const policy = { visibility: "selected" as const, allows_public_repositories: false }
+  if (existing) workflowWritable(existing, "GET /orgs/{org}/actions/runner-groups", changesWorkflows)
+  const policy = { visibility: "selected" as const, allows_public_repositories: false, ...workflowPolicy }
   const desired = { ...policy, selected_repository_ids: [repo.id] }
   if (dryRun) return { dry_run: true, action: existing ? "update" : "create", id: existing?.id ?? null, name, ...desired, repositories: [{ id: repo.id, full_name: repo.full_name }] }
 
   const group = existing
-    ? (await runnerApiCall("PATCH /orgs/{org}/actions/runner-groups/{runner_group_id}", () =>
-      octokit.request("PATCH /orgs/{org}/actions/runner-groups/{runner_group_id}", { org, runner_group_id: existing.id, name, ...policy }))).data
-    : (await runnerApiCall("POST /orgs/{org}/actions/runner-groups", () =>
-      octokit.request("POST /orgs/{org}/actions/runner-groups", { org, name, ...desired }))).data
+    ? (await groupPolicyCall("PATCH /orgs/{org}/actions/runner-groups/{runner_group_id}", () =>
+      octokit.request("PATCH /orgs/{org}/actions/runner-groups/{runner_group_id}", { org, runner_group_id: existing.id, name, ...policy }), changesWorkflows)).data
+    : (await groupPolicyCall("POST /orgs/{org}/actions/runner-groups", () =>
+      octokit.request("POST /orgs/{org}/actions/runner-groups", { org, name, ...desired }), changesWorkflows)).data
+  workflowWritable(group, existing ? "PATCH /orgs/{org}/actions/runner-groups/{runner_group_id}" : "POST /orgs/{org}/actions/runner-groups", changesWorkflows)
   if (existing) await runnerApiCall("PUT /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories", () =>
     octokit.request("PUT /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories", { org, runner_group_id: group.id, selected_repository_ids: [repo.id] }))
 
@@ -70,10 +105,40 @@ export const ensureRunnerGroup = async (octokit: GitHubOctokit, input: { org: st
     octokit.request("GET /orgs/{org}/actions/runner-groups/{runner_group_id}", { org, runner_group_id: group.id }), "organization_self_hosted_runners: read")
   const repositories = await runnerApiCall("GET /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories", () =>
     octokit.paginate("GET /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories", { org, runner_group_id: group.id, per_page: 100 }), "organization_self_hosted_runners: read")
+  workflowWritable(saved, "GET /orgs/{org}/actions/runner-groups/{runner_group_id}", changesWorkflows)
+  const requestedWorkflows = workflowPolicy.selected_workflows
+  const workflowsMatch = requestedWorkflows === undefined || (
+    Array.isArray(saved.selected_workflows) && saved.selected_workflows.length === requestedWorkflows.length &&
+    requestedWorkflows.every((workflow) => saved.selected_workflows!.includes(workflow))
+  )
+  if (changesWorkflows && (saved.restricted_to_workflows !== workflowPolicy.restricted_to_workflows || !workflowsMatch)) {
+    throw new RunnerApiError("runner group workflow policy readback mismatch")
+  }
   if (saved.visibility !== "selected" || saved.allows_public_repositories !== false || repositories.length !== 1 || repositories[0]?.id !== repo.id) {
     throw new RunnerApiError("runner group policy readback mismatch")
   }
-  return { dry_run: false, id: saved.id, name: saved.name, visibility: saved.visibility, allows_public_repositories: saved.allows_public_repositories, repositories: repositories.map(({ id, full_name }) => ({ id, full_name })) }
+  return { dry_run: false, id: saved.id, name: saved.name, visibility: saved.visibility, allows_public_repositories: saved.allows_public_repositories, repositories: repositories.map(({ id, full_name }) => ({ id, full_name })), ...(changesWorkflows ? { restricted_to_workflows: saved.restricted_to_workflows, selected_workflows: saved.selected_workflows } : {}) }
+}
+
+export const listRunnerGroups = async (octokit: GitHubOctokit, org: string, name?: string) => {
+  const allGroups = await groups(octokit, org)
+  const selected = name === undefined ? allGroups : allGroups.filter((group) => group.name === name)
+  if (name !== undefined && selected.length !== 1) throw new RunnerApiError("runner group not found or ambiguous")
+  const result = []
+  for (const group of selected) {
+    const repositories = group.visibility === "selected"
+      ? (await runnerApiCall("GET /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories", () =>
+        octokit.paginate("GET /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories", { org, runner_group_id: group.id, per_page: 100 }), "organization_self_hosted_runners: read")).map(({ full_name }) => full_name)
+      : group.visibility
+    result.push({
+      id: group.id, name: group.name, visibility: group.visibility, default: group.default,
+      allows_public_repositories: group.allows_public_repositories,
+      restricted_to_workflows: group.restricted_to_workflows, selected_workflows: group.selected_workflows,
+      workflow_restrictions_read_only: group.workflow_restrictions_read_only,
+      repositories,
+    })
+  }
+  return result
 }
 
 export const listOrgRunners = async (octokit: GitHubOctokit, org: string, groupName?: string) => {

@@ -13,6 +13,14 @@ The CLI uses the organization's GitHub App installation for runner management. T
 
 `runner-group --org <org> --name <name> --repo <owner/repo>` creates or restricts a group to exactly one private repository. It sets selected visibility and disables public repositories. Existing groups replace their repository allowlist. Readback verifies the effective policy before reporting success. The update uses separate policy and repository-access requests, so a failed second request can leave a partial update; rerun only after inspecting the reported endpoint failure. Dry-run reads the target and reports the intended policy without writes.
 
+`runner-group --workflow <owner/repo/.github/workflows/file.yml@refs/heads/branch>` adds workflow restrictions. Repeat the flag for an allowlist, or use a full `refs/tags/` ref. The workflow owner must match `--org`; wildcards, bare refs and SHAs refuse before HTTP. Create and update send `restricted_to_workflows: true` and `selected_workflows`. Readback requires the enabled restriction and an exact, order-insensitive workflow set.
+
+`--all-workflows` sends and verifies `restricted_to_workflows: false`; it is mutually exclusive with `--workflow`. Without either flag, request bodies and result shapes retain the existing repository-only behavior, leaving any workflow restriction untouched. Dry-run exposes the intended workflow fields without writes.
+
+Workflow policy writes that return 403 or 422 fail with sanitized endpoint/status context and `workflow restriction not available for this group or plan`. The same refusal applies to a read-only workflow policy discovered during listing, write response or readback. There is no retry or repo-only success fallback. A partial update remains possible after a successful policy write; inspect before retrying.
+
+`runner-groups --org <org> [--name <name>]` reads group identifiers, visibility, default/public flags, workflow policy and selected repository full names. Both collections paginate. A missing or ambiguous named group fails. This command performs no writes.
+
 `runners --org <org> [--group <name>]` reads runners and their group membership. All collection reads follow GitHub pagination. A missing named group fails instead of silently returning an empty list.
 
 ## Registration expiry validation
