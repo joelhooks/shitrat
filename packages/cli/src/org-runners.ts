@@ -152,7 +152,7 @@ export const listRepoRunners = async (octokit: GitHubOctokit, repo: string) => {
   }))
 }
 
-// Lifecycle: read -> refuse live | verify absent | preview | delete -> verify absent.
+// Lifecycle: read -> refuse unproven idle | verify absent | preview | delete -> verify absent.
 // A runner GET 404 alone is ambiguous: GitHub also masks missing permissions as 404.
 export const removeRepoRunner = async (octokit: GitHubOctokit, input: { repo: string; id: number; dryRun: boolean }) => {
   const { repo, id, dryRun } = input
@@ -173,7 +173,7 @@ export const removeRepoRunner = async (octokit: GitHubOctokit, input: { repo: st
   const runner = await read()
   const absentReadback = { single: 404, listed: false }
   if (runner === null) return { repo, id, name: null, status: null, removed: false, alreadyAbsent: true, readback: absentReadback }
-  if (runner.status === "online" || runner.busy === true) throw new RunnerApiError("runner removal refused: runner is online or busy; wait until offline and idle, then read again")
+  if (runner.status !== "offline" || runner.busy !== false) throw new RunnerApiError(`runner removal refused: status=${JSON.stringify(runner.status)}, busy=${JSON.stringify(runner.busy)}; requires status="offline" and busy=false; wait until offline and idle, then read again`)
   const result = { repo, id, name: runner.name, status: runner.status, removed: false, alreadyAbsent: false }
   if (dryRun) return { ...result, dry_run: true, request: { method: "DELETE", endpoint: `/repos/${ref.owner}/${ref.repo}/actions/runners/${id}` } }
   await runnerApiCall(`DELETE ${endpoint}`, () => octokit.rest.actions.deleteSelfHostedRunnerFromRepo(params), "administration: write")

@@ -364,7 +364,17 @@ describe("repository runners", () => {
   })
   for (const live of [{ status: "online", busy: false }, { status: "offline", busy: true }]) test(`refuses ${JSON.stringify(live)} without DELETE`, async () => {
     const gh = github({ [single]: { body: { ...offline, ...live } } })
-    await expect(removeRepoRunner(gh.octokit, removeInput)).rejects.toThrow("online or busy")
+    await expect(removeRepoRunner(gh.octokit, removeInput)).rejects.toThrow(`runner removal refused: status=${JSON.stringify(live.status)}, busy=${JSON.stringify(live.busy)}`)
+    expect(gh.calls.map(({ route }) => route)).toEqual([single])
+    expect(writes(gh.calls)).toEqual([])
+  })
+  for (const state of [
+    { status: "idle", busy: false },
+    { status: undefined, busy: false },
+    { status: "offline", busy: undefined },
+  ]) for (const dryRun of [false, true]) test(`refuses unknown or missing runner state ${JSON.stringify(state)} (dry-run=${dryRun})`, async () => {
+    const gh = github({ [single]: { body: { ...offline, ...state } } })
+    await expect(removeRepoRunner(gh.octokit, { ...removeInput, dryRun })).rejects.toThrow(`runner removal refused: status=${JSON.stringify(state.status)}, busy=${JSON.stringify(state.busy)}`)
     expect(gh.calls.map(({ route }) => route)).toEqual([single])
     expect(writes(gh.calls)).toEqual([])
   })
