@@ -4,6 +4,8 @@ GitHub App CLI and pi package for posting as `shitratgit[bot]` instead of Joel.
 
 ShitRat uses short-lived GitHub App installation tokens, not Joel's PAT. The CLI is agent-first: commands emit a JSON envelope with `ok`, `result`, and `next_actions`. `runner-token` is the exception: stdout contains only the registration token and a newline; expiry, help, and errors go to stderr.
 
+GitHub authentication defaults to the direct App key. Set `SHITRAT_GITHUB_VIA=cell` to route API and smart-HTTP Git requests through Lockjaw without loading the App key or installation token locally. Cell failures never silently fall back. See [cell configuration, identity and limitations](docs/github-cell.md). Authentication path logs are JSON lines on stderr; command results stay on stdout.
+
 ## Install
 
 ```bash

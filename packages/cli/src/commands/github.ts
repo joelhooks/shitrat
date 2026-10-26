@@ -17,9 +17,11 @@ import {
   inspectPushRepository,
   pushWithGit,
   resolvePushPlan,
+  runCellGit,
   ShitRatPushError,
 } from "../git-push.js"
 import { attestPushedSha, withAttest } from "../attest.js"
+import { isCellPlaceholder } from "../github-cell.js"
 import { CiReadError, isFailingRun, readChecks, readJobLog, readPullRequestStatus, rerunWorkflowRun } from "../ci-reads.js"
 import { labelIssue, setCommitStatus } from "../labels-statuses.js"
 import { createAnnotatedTag, createGitHubRelease, GitHubReleaseError } from "../github-releases.js"
@@ -648,7 +650,7 @@ const commitFilesToEmptyRepository = (
           if (prepared.gitMode === "100755") await chmod(targetPath, mode)
         }
 
-        askpassPath = await writeGitAskpass(authDir)
+        if (!isCellPlaceholder(installationToken)) askpassPath = await writeGitAskpass(authDir)
 
         await runGit(["init", "-b", targetBranch], { cwd: repoDir })
         await runGit(["config", "user.name", "shitratgit[bot]"], { cwd: repoDir })
@@ -667,12 +669,11 @@ const commitFilesToEmptyRepository = (
           },
         })
         const sha = await runGit(["rev-parse", "HEAD"], { cwd: repoDir })
-        await runGit(
-          [
-            "push",
-            `https://github.com/${repoRef.owner}/${repoRef.repo}.git`,
-            `HEAD:refs/heads/${targetBranch}`,
-          ],
+        const pushArgs = ["push", `https://github.com/${repoRef.owner}/${repoRef.repo}.git`, `HEAD:refs/heads/${targetBranch}`]
+        if (isCellPlaceholder(installationToken)) {
+          await runCellGit({ args: pushArgs, cwd: repoDir, placeholder: installationToken })
+        } else await runGit(
+          pushArgs,
           {
             cwd: repoDir,
             env: {
@@ -720,7 +721,7 @@ export const installationsCmd = Command.make("installations", {}, () =>
 export const statusCmd = Command.make("status", { repo: repoArg }, ({ repo }) =>
   Effect.gen(function* () {
     const repoRef = parseRepo(repo)
-    const installationId = yield* resolveInstallationId(repoRef.owner)
+    const installationId = process.env.SHITRAT_GITHUB_VIA === "cell" ? undefined : yield* resolveInstallationId(repoRef.owner)
     const { octokit, token } = yield* createRepoOctokit(repoRef)
     const repository = yield* Effect.tryPromise(() =>
       octokit.rest.repos.get({ owner: repoRef.owner, repo: repoRef.repo }),
@@ -734,7 +735,7 @@ export const statusCmd = Command.make("status", { repo: repoArg }, ({ repo }) =>
         repo: repository.data.full_name,
         private: repository.data.private,
         default_branch: repository.data.default_branch,
-        installation_id: installationId,
+        installation_id: installationId ?? token.installationId,
         token_expires_at: token.expiresAt,
         permissions: token.permissions,
       },
