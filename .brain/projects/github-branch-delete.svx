@@ -1,0 +1,37 @@
+---
+title: GitHub merged branch deletion
+status: implemented
+---
+
+# GitHub merged branch deletion
+
+`delete-branch` adds merged-only branch cleanup to the GitHub App CLI. It previews by default and needs `--yes` for DELETE. It never changes App permissions.
+
+## Contract
+
+Supply repeated `--branch` names or `--branches-file`, not both. Ref-prefixed names are refused. Repository metadata supplies the default branch; branch metadata supplies protection. A missing ref is `alreadyAbsent`. A present ref requires verified protection metadata and a full commit SHA.
+
+The branch lifecycle is serial: validate → protection → ref → compare → preview, or recheck → DELETE → readback. Only compare statuses `behind` and `identical` advance. A moved ref stops before DELETE. Only HTTP 404 on readback proves deletion. A refusal advances to the next branch. A repeated rate limit stops API requests and records failures for the remaining inputs.
+
+A request has two states: first attempt → one Retry-After cooldown → final attempt. Ordinary failures are not retried. The same installation Octokit owns both attempts. No extra client or dependency is introduced.
+
+## Audit boundary
+
+Open a private append-only audit sink before any branch work. Append and flush one JSONL record after each branch. A log failure stops further writes. Records contain the repository, branch, SHA, compare status, outcome, timestamp, CLI version and whether DELETE was attempted. They never contain tokens or raw SDK errors.
+
+The default sink is `~/.local/state/shitrat/branch-deletes.jsonl`; `--log` overrides it. Parent directories must be real directories with mode 0700. Log files are regular files with mode 0600, opened without following a final symlink. Existing data is preserved.
+
+## Limits
+
+GitHub offers no compare-and-delete operation conditioned on the observed SHA. The immediate re-read narrows the race but cannot eliminate it. Keep branch writers paused during deletion. Readback failures do not trigger rollback. A DELETE attempt can succeed despite a later error, so inspect state before retrying.
+
+GitHub can conceal permission failures as HTTP 404. The command verifies installation contents permissions and repository access before accepting missing refs; it cannot prove more than the API and permission metadata expose. A missing branch metadata response with a present ref is a loud failure, never proof that protection is off.
+
+## Sources and verification
+
+- Command and implementation: `packages/cli/src/commands/delete-branch.ts`.
+- Registration: `packages/cli/src/cli.ts`.
+- Fake-HTTP regression suite: `packages/cli/test/delete-branch.test.ts` and its preload fixture.
+- Usage and operational limits: `packages/cli/README.md`, “Delete merged branches”.
+- Gates: `bun run check`, `bun run test`, `bun run brain:check`.
+- Safety plants: remove compare guard, accept ahead, skip moved guard, skip readback, and delete during dry run. Each mutation must fail its regression before restoring the guard.
