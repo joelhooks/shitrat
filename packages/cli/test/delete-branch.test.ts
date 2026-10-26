@@ -6,7 +6,7 @@ import path from "node:path"
 
 const sha = "a".repeat(40)
 const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } })
-const run = async (scenario = "behind", args = ["--branch", "land/abc1234", "--yes"], repo = "example/project") => {
+const run = async (scenario = "behind", args = ["--branch", "land/abc1234", "--yes"], repo = "example/project", fixture: Record<string, string> = {}) => {
   const home = await mkdtemp(path.join(tmpdir(), "shitrat-delete-branch-test-"))
   try {
     const audit = path.join(home, "requests.json")
@@ -19,7 +19,7 @@ const run = async (scenario = "behind", args = ["--branch", "land/abc1234", "--y
       if (scenario === "symlink-log") { await writeFile(path.join(home, "untouched.jsonl"), '{"outcome":"prior"}\n'); await symlink(path.join(home, "untouched.jsonl"), customLog) }
     }
     const proc = Bun.spawn([process.execPath, "--preload", path.join(import.meta.dir, "fixtures/delete-branch-preload.ts"), path.join(import.meta.dir, "../src/cli.ts"), "delete-branch", ...args.map((arg) => arg === "FILE" ? path.join(home, "branches.txt") : arg === "EMPTY" ? path.join(home, "empty.txt") : arg === "LOG" ? customLog : arg), repo], {
-      env: { PATH: process.env.PATH, HOME: home, SHITRAT_GITHUB_APP_ID: "123", SHITRAT_GITHUB_PRIVATE_KEY: privateKey, SHITRAT_GITHUB_CLIENT_ID: "test-client", SHITRAT_GITHUB_INSTALLATIONS_JSON: `{"${repo.split("/")[0]}":123}`, DELETE_BRANCH_TEST_AUDIT: audit, DELETE_BRANCH_TEST_SCENARIO: scenario, DELETE_BRANCH_TEST_REPO: repo },
+      env: { PATH: process.env.PATH, HOME: home, SHITRAT_GITHUB_APP_ID: "123", SHITRAT_GITHUB_PRIVATE_KEY: privateKey, SHITRAT_GITHUB_CLIENT_ID: "test-client", SHITRAT_GITHUB_INSTALLATIONS_JSON: `{"${repo.split("/")[0]}":123}`, DELETE_BRANCH_TEST_AUDIT: audit, DELETE_BRANCH_TEST_SCENARIO: scenario, DELETE_BRANCH_TEST_REPO: repo, ...fixture },
       stdout: "pipe", stderr: "pipe",
     })
     const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
@@ -34,7 +34,7 @@ const run = async (scenario = "behind", args = ["--branch", "land/abc1234", "--y
     const logMode = await stat(logPath).then((s) => s.mode & 0o777).catch(() => null)
     const dirMode = await stat(path.dirname(logPath)).then((s) => s.mode & 0o777).catch(() => null)
     const envelope = JSON.parse(stdout)
-    if (process.env.DELETE_BRANCH_FIXTURE_OUTPUT && repo === "badass-courses/front-desk") {
+    if (process.env.DELETE_BRANCH_FIXTURE_OUTPUT && (repo === "badass-courses/front-desk" || repo === "joelhooks/rat-king")) {
       await writeFile(process.env.DELETE_BRANCH_FIXTURE_OUTPUT, stdout.replaceAll(home, "<fixture-home>"))
     }
     return { stdout, envelope, exitCode, requests, deletes: requests.filter((r) => r.startsWith("DELETE ")), log, logMode, dirMode }
@@ -129,6 +129,61 @@ describe("delete-branch CLI (fake HTTP)", () => {
     expect(r.exitCode).not.toBe(0)
     expect(r.requests).toEqual([])
     expect(r.deletes).toEqual([])
+  })
+  const tagArgs = (...extra: string[]) => ["--branch", "land/abc1234", "--preserved-by-tag", "land/abc1234", ...extra]
+  const tagGets = (requests: string[]) => requests.filter((route) => route.includes("/git/ref/tags/"))
+  for (const [shape, objects] of [["annotated", 1], ["lightweight", 0], ["nested", 2]] as const) test(`--preserved-by-tag deletes when a ${shape} tag peels to the branch sha`, async () => {
+    const r = await run("behind", tagArgs("--yes"), "example/project", { DELETE_BRANCH_TEST_TAG: shape })
+    expect(r.exitCode).toBe(0)
+    expect(r.envelope.result.counts).toMatchObject({ deleted: 1, refused: 0, failed: 0 })
+    expect(r.requests.some((route) => route.includes("/compare/"))).toBe(false)
+    expect(tagGets(r.requests)).toHaveLength(2)
+    expect(r.requests.filter((route) => route.includes("/git/tags/"))).toHaveLength(objects * 2)
+    expect(r.deletes).toEqual(["DELETE /repos/example/project/git/refs/heads/land/abc1234"])
+    expect(r.requests.slice(-1)).toEqual(["GET /repos/example/project/git/ref/heads/land/abc1234"])
+    expect(r.log[0]).toMatchObject({ outcome: "deleted", sha, compare_status: null, preserved_by_tag: "land/abc1234", tag_object_sha: shape === "lightweight" ? sha : "1".repeat(40), tag_peeled_sha: sha })
+  })
+  test("--preserved-by-tag dry run sends no DELETE and logs the tag fields", async () => {
+    const r = await run("behind", tagArgs())
+    expect(r.exitCode).toBe(0)
+    expect(r.deletes).toEqual([])
+    expect(tagGets(r.requests)).toHaveLength(1)
+    expect(r.requests.some((route) => route.includes("/compare/"))).toBe(false)
+    expect(r.log[0]).toMatchObject({ outcome: "dryRun", compare_status: null, preserved_by_tag: "land/abc1234", tag_object_sha: "1".repeat(40), tag_peeled_sha: sha })
+  })
+  for (const [scenario, shape, code] of [["behind", "missing", "TagMissing"], ["behind", "mismatch", "TagMismatch"], ["behind", "tree", "TagNotCommit"], ["behind", "deep", "TagPeelTooDeep"], ["behind", "moved", "TagMoved"], ["behind", "moved-missing", "TagMoved"], ["protected", "annotated", "ProtectedBranch"], ["open-pull", "annotated", "OpenPullRequest"], ["moved", "annotated", "BranchMoved"]] as const) test(`--preserved-by-tag refuses ${code} (${scenario}/${shape}) with no DELETE`, async () => {
+    const r = await run(scenario, tagArgs("--yes"), "example/project", { DELETE_BRANCH_TEST_TAG: shape })
+    expect(r.exitCode).not.toBe(0)
+    expect(r.deletes).toEqual([])
+    expect(r.requests.some((route) => route.includes("/compare/"))).toBe(false)
+    expect(r.envelope.result).toMatchObject({ github_write: false, counts: { refused: 1, failed: 0 } })
+    expect(r.log[0]).toMatchObject({ outcome: "refused", compare_status: null, preserved_by_tag: "land/abc1234", delete_attempted: false, error: { code } })
+    expect(JSON.stringify(r.log[0])).not.toContain("Not Found")
+    if (code === "TagMismatch") expect(r.log[0].error.message).toContain("c".repeat(40))
+    if (code === "TagMismatch") expect(r.log[0].error.message).toContain(sha)
+    if (code === "TagPeelTooDeep") expect(r.requests.filter((route) => route.includes("/git/tags/"))).toHaveLength(5)
+  })
+  test("without --preserved-by-tag, compare is still called and its 404 still fails", async () => {
+    const r = await run("compare-404")
+    expect(r.requests).toContain(`GET /repos/example/project/compare/main...${sha}`)
+    expect(tagGets(r.requests)).toEqual([])
+    expect(r.deletes).toEqual([])
+    expect(r.log[0]).toEqual({ repo: "example/project", branch: "land/abc1234", sha, compare_status: null, outcome: "failed", timestamp: "2026-10-26T00:00:00.000Z", cli_version: "0.1.0", delete_attempted: false, error: { code: "GitHubRequestFailed", message: expect.stringContaining("HTTP 404") } })
+  })
+  for (const args of [["--branches-file", "FILE", "--preserved-by-tag", "x"], ["--branch", "land/a", "--branch", "land/b", "--preserved-by-tag", "x"], ["--branch", "land/a", "--preserved-by-tag", "refs/tags/x"], ["--branch", "land/a", "--preserved-by-tag", "a..b"]]) test(`invalid tag mode is a usage error before any request (${args.join(" ")})`, async () => {
+    const r = await run("behind", args)
+    expect(r.exitCode).not.toBe(0)
+    expect(r.envelope.ok).toBe(false)
+    expect(["InvalidTagMode", "InvalidTag"]).toContain(r.envelope.error.code)
+    expect(r.requests).toEqual([])
+  })
+  test("rat-king dist branch preserved by its annotated tag previews cleanly", async () => {
+    const branch = "alchemy-nest-dist/fd780e4"
+    const tip = "b2fcaf7".padEnd(40, "0")
+    const r = await run("behind", ["--branch", branch, "--preserved-by-tag", branch], "joelhooks/rat-king", { DELETE_BRANCH_TEST_SHA: tip, DELETE_BRANCH_TEST_TAG_OBJECT: "4c5ba26".padEnd(40, "0"), DELETE_BRANCH_TEST_BRANCH: branch })
+    expect(r.exitCode).toBe(0)
+    expect(r.deletes).toEqual([])
+    expect(r.log[0]).toMatchObject({ outcome: "dryRun", sha: tip, compare_status: null, tag_peeled_sha: tip })
   })
   test("existing audit records survive and file mode is tightened to 0600", async () => {
     const r = await run("existing-log", ["--branch", "land/abc1234", "--log", "LOG", "--yes"])

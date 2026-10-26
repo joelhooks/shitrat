@@ -15,6 +15,10 @@ The branch lifecycle is serial: validate → protection → ref → compare → 
 
 A request has two states: first attempt → one Retry-After cooldown → final attempt. Ordinary failures are not retried. The same installation Octokit owns both attempts. No extra client or dependency is introduced. Retry-After values longer than five minutes stop immediately with `RateLimited`; the error carries the reset time in `reset_at` and its message, and remaining branches are logged as failed without more API requests.
 
+## Tag-preserved mode
+
+Some branches can never pass the merge check: a parentless dist commit has unrelated history, and GitHub answers its compare with HTTP 404. `--preserved-by-tag <tag>` proves "nothing lost" another way, for exactly one `--branch`. It replaces only the compare step: read the tag ref, peel lightweight or annotated tags (at most five tag objects) to a commit, and require that commit to equal the branch SHA. The refusals are `TagMissing`, `TagMismatch`, `TagNotCommit` and `TagPeelTooDeep`. Confirmed writes re-peel the tag after the branch re-read; a missing or re-pointed tag refuses `TagMoved`. All tag refusals count as `refused`. Every other guard stays, and the mode makes no compare call. Records keep `compare_status: null` and add `preserved_by_tag`, `tag_object_sha` and `tag_peeled_sha`. Without the flag the output is byte-identical to before. The first user is a dist branch whose annotated tag peels to the same commit.
+
 ## Audit boundary
 
 Open a private append-only audit sink before any branch work. Append and flush one JSONL record after each branch. A log failure stops further writes. Records contain the repository, branch, SHA, compare status, outcome, timestamp, CLI version and whether DELETE was attempted. They never contain tokens or raw SDK errors.
@@ -34,4 +38,4 @@ GitHub can conceal permission failures as HTTP 404. The command verifies install
 - Fake-HTTP regression suite: `packages/cli/test/delete-branch.test.ts` and its preload fixture.
 - Usage and operational limits: `packages/cli/README.md`, “Delete merged branches”.
 - Gates: `bun run check`, `bun run test`, `bun run brain:check`.
-- Safety plants: remove compare guard, accept ahead, skip moved guard, skip readback, delete during dry run, and drop the open-PR refusal. Each mutation must fail its regression before restoring the guard.
+- Safety plants: remove compare guard, accept ahead, skip moved guard, skip readback, delete during dry run, and drop the open-PR refusal. Tag mode adds: skip the peeled-SHA equality, skip the pre-DELETE tag re-check, skip protection in tag mode, call compare in tag mode, and accept a tag ending at a tree. Each mutation must fail its regression before restoring the guard.

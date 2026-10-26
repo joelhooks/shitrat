@@ -12,7 +12,18 @@ mock.module("node:child_process", () => ({ spawn: refuseSpawn, spawnSync: refuse
 const reads = new Map<string, number>()
 const deleted = new Set<string>()
 let limitedReads = 0
-const sha = "a".repeat(40)
+const sha = process.env.DELETE_BRANCH_TEST_SHA ?? "a".repeat(40)
+// Tag shapes for --preserved-by-tag: annotated, lightweight, nested, missing, mismatch, tree, deep, moved, moved-missing.
+const tagShape = process.env.DELETE_BRANCH_TEST_TAG ?? "annotated"
+const tagObjectSha = process.env.DELETE_BRANCH_TEST_TAG_OBJECT ?? "1".repeat(40)
+let tagReads = 0
+// Annotated tag objects: tagObjectSha → (nested: 2…) → target. "deep" never reaches a commit.
+const tagObjects = (): Record<string, { type: string; sha: string }> => {
+  const target = tagShape === "mismatch" || (tagShape === "moved" && tagReads > 1) ? { type: "commit", sha: "c".repeat(40) } : tagShape === "tree" ? { type: "tree", sha: "e".repeat(40) } : { type: "commit", sha }
+  if (tagShape === "deep") return Object.fromEntries([1, 2, 3, 4, 5, 6, 7].map((n) => [n === 1 ? tagObjectSha : String(n).repeat(40), { type: "tag", sha: String(n + 1).repeat(40) }]))
+  if (tagShape === "nested") return { [tagObjectSha]: { type: "tag", sha: "2".repeat(40) }, ["2".repeat(40)]: target }
+  return { [tagObjectSha]: target }
+}
 globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
   const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url)
   const route = `${init?.method ?? "GET"} ${decodeURIComponent(url.pathname)}`
@@ -48,7 +59,7 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
     return reply({ ref: `refs/heads/${branch}`, object: { type: "commit", sha: scenario === "moved" && count > 1 ? "b".repeat(40) : sha } })
   }
   if (route === `GET ${root}/pulls`) {
-    if (url.searchParams.get("state") !== "open" || url.searchParams.get("head") !== `${root.split("/")[2]}:land/abc1234`) throw new Error("Wrong pull request filter")
+    if (url.searchParams.get("state") !== "open" || url.searchParams.get("head") !== `${root.split("/")[2]}:${process.env.DELETE_BRANCH_TEST_BRANCH ?? "land/abc1234"}`) throw new Error("Wrong pull request filter")
     if (scenario === "pulls-403") return reply({ message: "FAKE-INSTALLATION-TOKEN" }, 403)
     if (scenario === "pulls-404") return missing()
     return reply(scenario === "open-pull" ? [{ number: 42 }, { number: 73 }] : [])
@@ -57,6 +68,18 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
     if (scenario === "compare-404") return missing()
     if (scenario === "compare-403") return reply({ message: "FAKE-INSTALLATION-TOKEN" }, 403)
     return reply({ status: ["ahead", "diverged", "identical", "unknown"].includes(scenario) ? scenario : "behind" })
+  }
+  if (route.startsWith(`GET ${root}/git/ref/tags/`)) {
+    tagReads++
+    if (tagShape === "missing" || (tagShape === "moved-missing" && tagReads > 1)) return missing()
+    if (tagShape === "lightweight") return reply({ ref: `refs/tags/${route.slice(`GET ${root}/git/ref/tags/`.length)}`, object: { type: "commit", sha } })
+    return reply({ ref: `refs/tags/${route.slice(`GET ${root}/git/ref/tags/`.length)}`, object: { type: "tag", sha: tagObjectSha } })
+  }
+  if (route.startsWith(`GET ${root}/git/tags/`)) {
+    const tagSha = route.slice(`GET ${root}/git/tags/`.length)
+    const object = tagObjects()[tagSha]
+    if (!object) return missing()
+    return reply({ sha: tagSha, tag: "fixture", object })
   }
   if (route.startsWith(`DELETE ${root}/git/refs/heads/`)) {
     if (scenario === "delete-404") return missing()
