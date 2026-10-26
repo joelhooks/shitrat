@@ -200,6 +200,18 @@ Each branch is checked serially. The command refuses the repository's default br
 
 Confirmed writes re-read the ref immediately before DELETE. A changed or disappeared SHA returns `BranchMoved`. Deletion succeeds only after a ref GET returns HTTP 404. GitHub has no conditional-SHA DELETE: another writer can still move the ref after the last read, so keep branch writers paused during cleanup. A failed readback can leave a real deletion; inspect state rather than retrying blindly. `github_write` reports whether any DELETE was attempted, not whether every deletion succeeded.
 
+### Branches preserved by a tag
+
+```bash
+# Preview. One --branch only; the tag is a short name, not refs/tags/...
+bun run src/cli.ts delete-branch --branch dist/abc1234 --preserved-by-tag dist/abc1234 example/project
+bun run src/cli.ts delete-branch --branch dist/abc1234 --preserved-by-tag dist/abc1234 --yes example/project
+```
+
+Some branches never merge into the default branch, such as a parentless dist commit. GitHub answers `compare` on unrelated histories with HTTP 404, so the normal merge check fails. `--preserved-by-tag <tag>` replaces only that merge check, and makes no compare call. The command reads `GET /repos/{owner}/{repo}/git/ref/tags/{tag}` and peels it to a commit. A lightweight tag is its own commit. An annotated tag follows `GET .../git/tags/{sha}` through at most five tag objects. The peeled commit must equal the branch SHA exactly.
+
+Refusals: a missing tag is `TagMissing`; a different commit is `TagMismatch`, naming both SHAs; a tag that ends at a tree or blob is `TagNotCommit`; more than five nested tag objects is `TagPeelTooDeep`. With `--yes`, the tag is re-read and re-peeled right after the branch re-read and before DELETE. A missing tag or a different peeled SHA refuses `TagMoved`. Every other guard is unchanged: default-branch refusal, fail-closed protection, open-PR preflight, `BranchMoved`, the 404 readback, dry run by default and the audit rules. `--preserved-by-tag` with `--branches-file` or a repeated `--branch` is a usage error before any request. Tag reads need Contents: read. Records keep `compare_status: null` and add `preserved_by_tag`, `tag_object_sha` (what the tag ref points at) and `tag_peeled_sha`. Without the flag, output is unchanged.
+
 Every branch result, including previews and refusals, appends a JSONL record with repo, branch, SHA, compare status, outcome, timestamp and CLI version. The default log is `~/.local/state/shitrat/branch-deletes.jsonl`. Use `--log <path>` to choose another file. The parent directory must have mode 0700; newly created directories use 0700. The file uses 0600. Existing logs are appended, never truncated; symlink log files and non-private parent directories are refused before deletion. Log writes are flushed after each branch. Audit failures stop the batch, because continuing could delete branches without receipts.
 
 The JSON envelope includes per-branch results and outcome counts, even when `ok` is false. A refusal or failure makes the exit code nonzero without stopping later branches. A rate limit honors `Retry-After` once through the same installation client; a repeated limit stops further requests with `RateLimited` and logs the remaining branches as failed. A Retry-After longer than five minutes also stops immediately, without sleeping or retrying; the typed error includes the reset time in its message and `reset_at` field. Short waits still retry once. Tests use fake HTTP only.
