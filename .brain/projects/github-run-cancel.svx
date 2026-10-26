@@ -1,0 +1,33 @@
+---
+title: GitHub stale run cancellation
+status: implemented
+---
+
+# GitHub stale run cancellation
+
+`cancel-runs` cancels workflow runs that are still waiting, created before a cutoff. It previews by default and needs `--yes` to POST. It never changes App permissions.
+
+## Why
+
+A workflow using `concurrency` with a deep queue can fill GitHub's queue cap while deploys are parked. Once the queue is full, every new run fails at creation with zero jobs. Clearing stale waiting runs restores the queue. Agent writes go through the App installation, so this belongs in the CLI rather than a personal `gh run cancel`.
+
+## Contract
+
+`--workflow <file>` and `--created-before <ISO-8601>` are required; a future cutoff is refused. `--status` accepts only `pending`, `queued` and `waiting`, defaulting to all three. Started or completed states refuse before authentication, because cancelling a started run can kill a deploy mid-apply. `--max` defaults to 200 with a ceiling of 500.
+
+The run lifecycle is serial: list per status → keep `created_at < cutoff` → status guard → preview, or re-read → POST cancel → bounded readback. A listed run outside the waiting set refuses `StatusNotWaiting`. A run that leaves the waiting set before the POST refuses `StatusChanged`. Only `completed` with conclusion `cancelled` within five reads counts as success; anything else is `ReadbackMismatch`. A refusal advances to the next run. A repeated rate limit stops API requests and records failures for the remaining runs, with the same capped Retry-After rule as [GitHub merged branch deletion](./github-branch-delete.svx).
+
+## Audit boundary
+
+The default sink is `~/.local/state/shitrat/run-cancels.jsonl`; `--log` overrides it. Directory, file-mode and symlink rules match branch deletion. Records hold repo, run id, workflow, head SHA, `created_at`, `status_before`, outcome, timestamp and CLI version, never tokens or raw SDK errors.
+
+## Limits
+
+GitHub has no conditional cancel. The re-read narrows the start race but cannot close it. A failed readback can leave a real cancellation; inspect before resending.
+
+## Sources and verification
+
+- Command and implementation: `packages/cli/src/commands/cancel-runs.ts`; registration in `packages/cli/src/cli.ts`.
+- Fake-HTTP regression suite: `packages/cli/test/cancel-runs.test.ts` and its preload fixture.
+- Usage: `packages/cli/README.md`, “Cancel stale waiting runs”.
+- Safety plants: remove the pre-cancel status recheck, remove the listed-status guard, loosen the cutoff to `>`, drop the cutoff, POST during dry run, and accept any completed readback. Each mutation failed its regression before the guard was restored.
