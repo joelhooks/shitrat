@@ -1,6 +1,7 @@
 import { Octokit } from "@octokit/rest"
 import { Effect } from "effect"
-import { createInstallationToken, parseRepo, type GitHubOctokit } from "./github-app.js"
+import { createInstallationToken, createTokenOctokit, parseRepo, type GitHubOctokit } from "./github-app.js"
+import { isCellPlaceholder } from "./github-cell.js"
 
 // Never retain an Octokit error: it can contain authorization headers or response tokens.
 export class RunnerApiError extends Error {
@@ -24,7 +25,7 @@ export const runnerApiCall = async <T>(endpoint: string, request: () => Promise<
 }
 
 export const createOrgOctokit = (org: string) => createInstallationToken(org).pipe(
-  Effect.map(({ token }) => new Octokit({
+  Effect.map(({ token }) => isCellPlaceholder(token) ? createTokenOctokit(token) : new Octokit({
     auth: token,
     // Octokit's default logger can print an HTTP error before our sanitizer sees it.
     log: { debug() {}, info() {}, warn() {}, error() {} },
