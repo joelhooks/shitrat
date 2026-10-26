@@ -11,9 +11,9 @@ status: implemented
 
 Supply repeated `--branch` names or `--branches-file`, not both. Ref-prefixed names are refused. Repository metadata supplies the default branch; branch metadata supplies protection. A missing ref is `alreadyAbsent`. A present ref requires verified protection metadata and a full commit SHA.
 
-The branch lifecycle is serial: validate → protection → ref → compare → preview, or recheck → DELETE → readback. Only compare statuses `behind` and `identical` advance. A moved ref stops before DELETE. Only HTTP 404 on readback proves deletion. A refusal advances to the next branch. A repeated rate limit stops API requests and records failures for the remaining inputs.
+The branch lifecycle is serial: validate → protection → ref → compare → open-PR check → preview, or recheck → DELETE → readback. Only compare statuses `behind` and `identical` advance. An open pull request for `head={owner}:{branch}` refuses with `OpenPullRequest`, naming the PR numbers, including during previews. A moved ref stops before DELETE. Only HTTP 404 on readback proves deletion. A refusal advances to the next branch. A repeated rate limit stops API requests and records failures for the remaining inputs.
 
-A request has two states: first attempt → one Retry-After cooldown → final attempt. Ordinary failures are not retried. The same installation Octokit owns both attempts. No extra client or dependency is introduced.
+A request has two states: first attempt → one Retry-After cooldown → final attempt. Ordinary failures are not retried. The same installation Octokit owns both attempts. No extra client or dependency is introduced. Retry-After values longer than five minutes stop immediately with `RateLimited`; the error carries the reset time in `reset_at` and its message, and remaining branches are logged as failed without more API requests.
 
 ## Audit boundary
 
@@ -34,4 +34,4 @@ GitHub can conceal permission failures as HTTP 404. The command verifies install
 - Fake-HTTP regression suite: `packages/cli/test/delete-branch.test.ts` and its preload fixture.
 - Usage and operational limits: `packages/cli/README.md`, “Delete merged branches”.
 - Gates: `bun run check`, `bun run test`, `bun run brain:check`.
-- Safety plants: remove compare guard, accept ahead, skip moved guard, skip readback, and delete during dry run. Each mutation must fail its regression before restoring the guard.
+- Safety plants: remove compare guard, accept ahead, skip moved guard, skip readback, delete during dry run, and drop the open-PR refusal. Each mutation must fail its regression before restoring the guard.

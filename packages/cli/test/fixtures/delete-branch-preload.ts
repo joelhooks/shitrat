@@ -16,7 +16,7 @@ const sha = "a".repeat(40)
 globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
   const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url)
   const route = `${init?.method ?? "GET"} ${decodeURIComponent(url.pathname)}`
-  requests.push(route)
+  requests.push(url.searchParams.has("head") ? `${route}${url.search}` : route)
   if (url.origin !== "https://api.github.com") throw new Error("Unexpected network origin")
   const reply = (data: unknown, status = 200, headers: Record<string, string> = {}) => status === 204
     ? new Response(null, { status })
@@ -34,7 +34,7 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
     if (scenario === "branch-404" || scenario === "absent") return missing()
     if (scenario.startsWith("rate-")) {
       limitedReads++
-      if (scenario !== "rate-once" || limitedReads === 1) return reply({ message: "FAKE-INSTALLATION-TOKEN" }, scenario === "rate-403" ? 403 : 429, { "retry-after": "0" })
+      if (scenario !== "rate-once" || limitedReads === 1) return reply({ message: "FAKE-INSTALLATION-TOKEN" }, scenario === "rate-403" ? 403 : 429, { "retry-after": scenario === "rate-long" ? "301" : scenario === "rate-long-date" ? "Mon, 26 Oct 2026 00:05:01 GMT" : scenario === "rate-once" ? "0.01" : "0" })
     }
     const branch = route.slice(`GET ${root}/branches/`.length)
     return reply({ protected: scenario === "protected" || branch === "protected" })
@@ -46,6 +46,12 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
     if (deleted.has(branch) && scenario === "readback-403") return reply({ message: "FAKE-INSTALLATION-TOKEN" }, 403)
     if (scenario === "absent" || (scenario === "ref-disappeared" && count > 1) || (deleted.has(branch) && scenario !== "readback-mismatch")) return missing()
     return reply({ ref: `refs/heads/${branch}`, object: { type: "commit", sha: scenario === "moved" && count > 1 ? "b".repeat(40) : sha } })
+  }
+  if (route === `GET ${root}/pulls`) {
+    if (url.searchParams.get("state") !== "open" || url.searchParams.get("head") !== `${root.split("/")[2]}:land/abc1234`) throw new Error("Wrong pull request filter")
+    if (scenario === "pulls-403") return reply({ message: "FAKE-INSTALLATION-TOKEN" }, 403)
+    if (scenario === "pulls-404") return missing()
+    return reply(scenario === "open-pull" ? [{ number: 42 }, { number: 73 }] : [])
   }
   if (route === `GET ${root}/compare/main...${sha}`) {
     if (scenario === "compare-404") return missing()

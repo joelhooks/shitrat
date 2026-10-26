@@ -9,13 +9,13 @@ import { createRepoOctokit, parseRepo, type GitHubOctokit, type RepoRef } from "
 import { failure, json, success } from "../response.js"
 
 class BranchDeleteError extends Error {
-  constructor(readonly code: string, message: string) { super(message) }
+  constructor(readonly code: string, message: string, readonly resetAt?: string) { super(message) }
 }
 type Outcome = "deleted" | "dryRun" | "alreadyAbsent" | "refused" | "failed"
 type BranchResult = {
   repo: string; branch: string; sha: string | null; compare_status: string | null
   outcome: Outcome; timestamp: string; cli_version: string; delete_attempted: boolean
-  error?: { code: string; message: string }
+  error?: { code: string; message: string; reset_at?: string }
 }
 const fail = (code: string, message: string): never => { throw new BranchDeleteError(code, message) }
 const statusOf = (error: unknown): number | undefined =>
@@ -37,13 +37,13 @@ const request = async <A>(endpoint: string, run: () => Promise<A>, absent = fals
         if (attempt > 0 || retryAfter === undefined) return fail("RateLimited", `${endpoint} failed (HTTP ${status}); rate limit repeated or no Retry-After supplied. Stop and retry later.`)
         const delay = /^\d+(\.\d+)?$/.test(retryAfter) ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now()
         if (!Number.isFinite(delay)) fail("RateLimited", `${endpoint} failed (HTTP ${status}); invalid Retry-After. Stop and retry later.`)
-        // Chunk long delays so Node's timer overflow cannot turn a cooldown into an immediate retry.
-        let remaining = Math.max(0, delay)
-        while (remaining > 0) {
-          const chunk = Math.min(remaining, 2_147_483_647)
-          await new Promise((resolve) => setTimeout(resolve, chunk))
-          remaining -= chunk
+        const reset = new Date(Date.now() + Math.max(0, delay))
+        if (!Number.isFinite(reset.getTime())) fail("RateLimited", `${endpoint} failed (HTTP ${status}); invalid Retry-After reset time. Stop and retry later.`)
+        if (delay > 300_000) {
+          const resetAt = reset.toISOString()
+          throw new BranchDeleteError("RateLimited", `${endpoint} failed (HTTP ${status}); Retry-After exceeds five minutes. Stop the batch; retry after ${resetAt}.`, resetAt)
         }
+        await new Promise((resolve) => setTimeout(resolve, Math.max(0, delay)))
         continue
       }
       if (status === 404 && absent) return undefined
@@ -81,6 +81,10 @@ const deleteOne = async (octokit: GitHubOctokit, repo: RepoRef, defaultBranch: s
     () => octokit.rest.repos.compareCommits({ ...base, base: defaultBranch, head: result.sha! }))
   result.compare_status = comparison!.data.status
   if (result.compare_status !== "behind" && result.compare_status !== "identical") fail("NotMerged", "Branch tip is not reachable from the default branch; only behind or identical is accepted.")
+  const head = `${repo.owner}:${branch}`
+  const openPulls = await request(`GET ${root}/pulls?state=open&head=${encodeURIComponent(head)}`,
+    () => octokit.paginate(octokit.rest.pulls.list, { ...base, state: "open", head, per_page: 100 }))
+  if (openPulls!.length > 0) fail("OpenPullRequest", `Branch has open pull requests: ${openPulls!.map((pull) => `#${pull.number}`).join(", ")}. Nothing was deleted.`)
   if (!yes) { result.outcome = "dryRun"; return }
   const current = await request(refEndpoint, () => octokit.rest.git.getRef(ref), true)
   if (!current || current.data.object.sha !== result.sha) fail("BranchMoved", "Branch disappeared or moved after preflight; nothing was deleted.")
@@ -121,8 +125,8 @@ const runBatch = async (octokit: GitHubOctokit, repo: RepoRef, branches: string[
         await deleteOne(octokit, repo, defaultBranch, result, yes)
       } catch (error) {
         const typed = error instanceof BranchDeleteError ? error : new BranchDeleteError("BranchDeleteFailed", "Branch operation failed. Inspect state before retrying.")
-        result.error = { code: typed.code, message: typed.message }
-        result.outcome = ["InvalidBranch", "DefaultBranch", "ProtectedBranch", "NotMerged", "BranchMoved"].includes(typed.code) ? "refused" : "failed"
+        result.error = { code: typed.code, message: typed.message, ...(typed.resetAt === undefined ? {} : { reset_at: typed.resetAt }) }
+        result.outcome = ["InvalidBranch", "DefaultBranch", "ProtectedBranch", "NotMerged", "BranchMoved", "OpenPullRequest"].includes(typed.code) ? "refused" : "failed"
         if (typed.code === "RateLimited") stopped = typed
       }
       await log.writeFile(`${JSON.stringify(result)}\n`)

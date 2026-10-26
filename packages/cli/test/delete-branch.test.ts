@@ -73,6 +73,19 @@ describe("delete-branch CLI (fake HTTP)", () => {
     expect(r.envelope.result.results[0]).toMatchObject({ outcome: "refused", error: { code } })
     expect(r.log).toHaveLength(1)
   })
+  for (const confirmation of [[], ["--dry-run"], ["--yes"]]) test(`open PRs refuse in preflight (${confirmation.join(" ") || "default preview"})`, async () => {
+    const r = await run("open-pull", ["--branch", "land/abc1234", ...confirmation])
+    expect(r.exitCode).not.toBe(0)
+    expect(r.deletes).toEqual([])
+    expect(r.envelope.result).toMatchObject({ github_write: false, counts: { refused: 1, failed: 0 } })
+    expect(r.log[0]).toMatchObject({ outcome: "refused", error: { code: "OpenPullRequest" } })
+    expect(r.log[0].error.message).toContain("#42")
+    expect(r.log[0].error.message).toContain("#73")
+    const query = new URL(`https://api.github.com${r.requests.find((route) => route.includes("/pulls?"))!.slice(4)}`)
+    expect(query.searchParams.get("state")).toBe("open")
+    expect(query.searchParams.get("head")).toBe("example:land/abc1234")
+    expect(r.requests.filter((route) => route.includes("/git/ref/"))).toHaveLength(1)
+  })
   test("404 ref is alreadyAbsent, with no DELETE", async () => {
     const r = await run("absent")
     expect(r.exitCode).toBe(0)
@@ -86,7 +99,7 @@ describe("delete-branch CLI (fake HTTP)", () => {
     expect(r.deletes).toHaveLength(1)
     expect(r.envelope.result.results[0]).toMatchObject({ outcome: "failed", error: { code: "ReadbackMismatch" } })
   })
-  for (const [scenario, endpoint, status] of [["permission-403", "branches/land%2Fabc1234", 403], ["repo-404", "example/project", 404], ["branch-404", "branches/land%2Fabc1234", 404], ["compare-404", `compare/main...${sha}`, 404], ["compare-403", `compare/main...${sha}`, 403], ["delete-404", "git/refs/heads/land%2Fabc1234", 404], ["delete-403", "git/refs/heads/land%2Fabc1234", 403], ["readback-403", "git/ref/heads/land%2Fabc1234", 403]] as const) test(`${scenario} names endpoint, HTTP status and contents: write`, async () => {
+  for (const [scenario, endpoint, status] of [["permission-403", "branches/land%2Fabc1234", 403], ["repo-404", "example/project", 404], ["branch-404", "branches/land%2Fabc1234", 404], ["compare-404", `compare/main...${sha}`, 404], ["compare-403", `compare/main...${sha}`, 403], ["delete-404", "git/refs/heads/land%2Fabc1234", 404], ["delete-403", "git/refs/heads/land%2Fabc1234", 403], ["readback-403", "git/ref/heads/land%2Fabc1234", 403], ["pulls-403", "pulls?state=open&head=example%3Aland%2Fabc1234", 403], ["pulls-404", "pulls?state=open&head=example%3Aland%2Fabc1234", 404]] as const) test(`${scenario} names endpoint, HTTP status and contents: write`, async () => {
     const r = await run(scenario)
     expect(r.exitCode).not.toBe(0)
     const error = r.envelope.result.results[0].error
@@ -143,7 +156,19 @@ describe("delete-branch CLI (fake HTTP)", () => {
     expect(r.exitCode).toBe(0)
     expect(r.deletes).toEqual([])
   })
-  test("honors Retry-After once using the installation client", async () => {
+  for (const scenario of ["rate-long", "rate-long-date"]) test(`${scenario} stops without sleeping or retrying and carries reset time`, async () => {
+    const r = await run(scenario, ["--branch", "land/one", "--branch", "land/two", "--yes"])
+    expect(r.exitCode).not.toBe(0)
+    expect(r.requests.filter((route) => route.includes("/branches/"))).toHaveLength(1)
+    expect(r.deletes).toEqual([])
+    expect(r.envelope.result.counts.failed).toBe(2)
+    expect(r.log.map((item) => item.error)).toEqual([
+      expect.objectContaining({ code: "RateLimited", reset_at: "2026-10-26T00:05:01.000Z" }),
+      expect.objectContaining({ code: "RateLimited", reset_at: "2026-10-26T00:05:01.000Z" }),
+    ])
+    expect(r.log[0].error.message).toContain("2026-10-26T00:05:01.000Z")
+  }, 5000)
+  test("honors a short Retry-After wait once using the installation client", async () => {
     const r = await run("rate-once")
     expect(r.exitCode).toBe(0)
     expect(r.requests.filter((r) => r.includes("/branches/"))).toHaveLength(2)
