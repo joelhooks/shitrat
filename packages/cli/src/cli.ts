@@ -45,6 +45,7 @@ import {
   releaseCmd,
 } from "./commands/github.js"
 import { runnerGroupCmd, runnerGroupsCmd, runnerRemoveCmd, runnersCmd, runnerTokenCmd, runnerTokenInvoked } from "./commands/runners.js"
+import { deleteBranchCmd } from "./commands/delete-branch.js"
 import { inboxCmd } from "./commands/inbox.js"
 import { xCmd } from "./commands/x.js"
 import { errorMessage, failure, json, success } from "./response.js"
@@ -80,6 +81,7 @@ const root = Command.make("shitrat", {}, () =>
               merge_pr:
                 "shitrat merge-pr <owner/repo> <pull-number> --method squash --dry-run",
               tag: "shitrat tag <owner/repo> --name <tag> --target <full-sha> [--message <text>] [--dry-run|--yes]",
+              delete_branch: "shitrat delete-branch <owner/repo> [--branch <name>...] [--branches-file <path>] [--log <path>] [--dry-run|--yes]",
               release: "shitrat release <owner/repo> --tag <tag> [--title <title>] [--notes-file <path>|--generate-notes] [--draft] [--prerelease] [--dry-run|--yes]",
               ready_pr: "shitrat ready-pr <owner/repo> <pull-number> [--dry-run]",
               enqueue_pr: "shitrat enqueue-pr <owner/repo> <pull-number> [--method merge|squash|rebase] [--dry-run]",
@@ -305,6 +307,7 @@ const root = Command.make("shitrat", {}, () =>
     readyPrCmd,
     tagCmd,
     releaseCmd,
+    deleteBranchCmd,
     enqueuePrCmd,
     convertToDraftCmd,
     labelCmd,

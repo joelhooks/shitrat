@@ -183,6 +183,27 @@ A 403, 422 or read-only workflow policy fails with the endpoint, status and `wor
 
 Requests use existing repository `administration` permissions. A 403 or permission-masked 404 fails with sanitized endpoint, status and permission context. There are no retries or permission changes. A readback failure after DELETE can mean deletion happened but could not be verified; inspect with `runners --repo` before retrying. The pre-delete read is not atomic with DELETE: keep the runner stopped while removing its registration.
 
+## Delete merged branches
+
+```bash
+# Preview only. Supply branch names, not refs/heads/... refs.
+bun run src/cli.ts delete-branch --branch land/abc1234 example/project
+# Repeat --branch, or use a file with one name per line (not both).
+bun run src/cli.ts delete-branch --branches-file merged-branches.txt --dry-run example/project
+# After reviewing the preview, confirm the same inputs.
+bun run src/cli.ts delete-branch --branches-file merged-branches.txt --yes example/project
+```
+
+`delete-branch` defaults to dry run. `--yes` permits deletion; combining it with `--dry-run` is an error. The installation token needs Contents: read for previews and Contents: write for deletion. No App permissions are changed by this command.
+
+Each branch is checked serially. The command refuses the repository's default branch and branches whose branch GET reports protection. It reads the ref SHA and compares `default...sha`, accepting only `behind` or `identical`. `ahead` and `diverged` return `NotMerged`. A missing ref returns `alreadyAbsent` without a DELETE. Missing protection metadata with a present ref fails closed. After the merge check, preflight lists open pull requests with `state=open` and `head={owner}:{branch}`, including during previews. Any returned PR refuses deletion as `OpenPullRequest`, naming the PR numbers. The App must be able to read this PR endpoint; failures stop that branch rather than treating the result as an empty list. Permission failures name the endpoint, HTTP status and `contents: write`, without exposing GitHub response bodies or credentials.
+
+Confirmed writes re-read the ref immediately before DELETE. A changed or disappeared SHA returns `BranchMoved`. Deletion succeeds only after a ref GET returns HTTP 404. GitHub has no conditional-SHA DELETE: another writer can still move the ref after the last read, so keep branch writers paused during cleanup. A failed readback can leave a real deletion; inspect state rather than retrying blindly. `github_write` reports whether any DELETE was attempted, not whether every deletion succeeded.
+
+Every branch result, including previews and refusals, appends a JSONL record with repo, branch, SHA, compare status, outcome, timestamp and CLI version. The default log is `~/.local/state/shitrat/branch-deletes.jsonl`. Use `--log <path>` to choose another file. The parent directory must have mode 0700; newly created directories use 0700. The file uses 0600. Existing logs are appended, never truncated; symlink log files and non-private parent directories are refused before deletion. Log writes are flushed after each branch. Audit failures stop the batch, because continuing could delete branches without receipts.
+
+The JSON envelope includes per-branch results and outcome counts, even when `ok` is false. A refusal or failure makes the exit code nonzero without stopping later branches. A rate limit honors `Retry-After` once through the same installation client; a repeated limit stops further requests with `RateLimited` and logs the remaining branches as failed. A Retry-After longer than five minutes also stops immediately, without sleeping or retrying; the typed error includes the reset time in its message and `reset_at` field. Short waits still retry once. Tests use fake HTTP only.
+
 ## Tags and releases
 
 `tag` and `release` authenticate as the App and read GitHub during preflight. Without `--yes`, they only preview repository writes. `--dry-run` and `--yes` are mutually exclusive. Both commands need repository access; writes need Contents: write permission. They return the JSON envelope and exit nonzero on refusal or read-back failure.
