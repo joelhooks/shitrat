@@ -204,6 +204,25 @@ Every branch result, including previews and refusals, appends a JSONL record wit
 
 The JSON envelope includes per-branch results and outcome counts, even when `ok` is false. A refusal or failure makes the exit code nonzero without stopping later branches. A rate limit honors `Retry-After` once through the same installation client; a repeated limit stops further requests with `RateLimited` and logs the remaining branches as failed. A Retry-After longer than five minutes also stops immediately, without sleeping or retrying; the typed error includes the reset time in its message and `reset_at` field. Short waits still retry once. Tests use fake HTTP only.
 
+## Cancel stale waiting runs
+
+```bash
+# Preview only. Lists pending, queued and waiting preview.yml runs created before the cutoff.
+bun run src/cli.ts cancel-runs --workflow preview.yml --created-before 2026-10-26T00:00:00Z --dry-run example/project
+# After reviewing the preview, confirm the same inputs.
+bun run src/cli.ts cancel-runs --workflow preview.yml --created-before 2026-10-26T00:00:00Z --yes example/project
+```
+
+`cancel-runs` clears runs that are stuck waiting in a workflow's concurrency queue. GitHub caps that queue, and a full queue makes new runs fail at creation with no jobs. The command defaults to dry run. `--yes` permits cancellation; `--dry-run` always wins, even next to `--yes`. `--workflow` takes the workflow file name and `--created-before` takes an ISO-8601 timestamp with a timezone. Both are required, and a future cutoff is refused, so there is no cancel-everything form. The installation token needs Actions: read for previews and Actions: write for cancellation. No App permissions are changed by this command.
+
+`--status` is repeatable and defaults to `pending`, `queued` and `waiting`. Any other value, including `in_progress`, `requested` and completed states, refuses before authentication: cancelling a started run can kill a deploy or preview mid-apply. `--max` defaults to 200 and cannot exceed 500. Runs are listed per status from `GET /repos/{owner}/{repo}/actions/workflows/{file}/runs`, paged, deduplicated, kept only when `created_at` is strictly before the cutoff, and processed oldest first. The result reports `skipped_after_cutoff` and `remaining_over_max`.
+
+Each run is checked serially. A listed run whose status is outside the allowed set refuses as `refused:StatusNotWaiting` without a request. Confirmed writes re-read the run immediately before `POST .../actions/runs/{id}/cancel`; a run that has left the waiting set refuses as `refused:StatusChanged`. Cancellation succeeds only when a readback shows `completed` with conclusion `cancelled`, within five reads about two seconds apart. Anything else is `failed:ReadbackMismatch`. GitHub has no conditional cancel, so a run can still start between the last read and the POST; a failed readback can still leave a real cancellation, so inspect the run rather than resending blindly. `github_write` reports whether any POST was sent.
+
+Every processed run appends a JSONL record with repo, run id, workflow, head SHA, `created_at`, `status_before`, outcome (`cancelled`, `would-cancel`, `refused:<code>` or `failed:<code>`), timestamp and CLI version. The default log is `~/.local/state/shitrat/run-cancels.jsonl`; `--log <path>` chooses another file. The audit rules match `delete-branch`: a 0700 parent directory, a 0600 file, append-only, symlinks refused, and an audit failure stops the batch before any cancel.
+
+The JSON envelope includes per-run results and outcome counts. A refusal or failure makes the exit code nonzero without stopping later runs. Failures name the endpoint, HTTP status and `actions: write`, without GitHub response bodies or credentials. Rate limits use the same capped Retry-After handling as `delete-branch`: one short wait through the same installation client, then `RateLimited` for the remaining runs. Tests use fake HTTP only.
+
 ## Tags and releases
 
 `tag` and `release` authenticate as the App and read GitHub during preflight. Without `--yes`, they only preview repository writes. `--dry-run` and `--yes` are mutually exclusive. Both commands need repository access; writes need Contents: write permission. They return the JSON envelope and exit nonzero on refusal or read-back failure.
