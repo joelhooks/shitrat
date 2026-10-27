@@ -1,4 +1,5 @@
 import path from "node:path"
+import { githubGitUrl } from "./git-token-fallback.js"
 
 export const SHITRAT_GIT_AUTHOR = {
   name: "shitratgit[bot]",
@@ -98,6 +99,8 @@ export const buildAuthenticatedGitInvocation = (
     "-c",
     "protocol.https.allow=always",
     "-c",
+    "http.followRedirects=false",
+    "-c",
     "credential.helper=",
     "-c",
     `credential.helper=${GITHUB_CREDENTIAL_HELPER}`,
@@ -106,10 +109,11 @@ export const buildAuthenticatedGitInvocation = (
   env: {
     ...AUTHENTICATED_GIT_CONFIG_ENV,
     [PUSH_TOKEN_ENV]: installationToken,
+    GIT_TERMINAL_PROMPT: "0",
   },
 })
 
-const runAuthenticatedGit = async (
+export const runAuthenticatedGit = async (
   args: readonly string[],
   cwd: string,
   installationToken: string,
@@ -155,7 +159,7 @@ const repositoryFromRemoteUrl = (remoteUrl: string): string | undefined => {
 
   try {
     const parsed = new URL(trimmed)
-    if (parsed.hostname.toLowerCase() !== "github.com") return undefined
+    if (parsed.hostname.toLowerCase() !== "github.com" || parsed.password || (parsed.protocol === "https:" && parsed.username)) return undefined
     const pathname = parsed.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "")
     return pathname.split("/").length === 2 ? pathname : undefined
   } catch {
@@ -239,7 +243,7 @@ export const inspectPushRepository = async (input: {
   return { repo: input.repo, gitRoot, branch, localSha }
 }
 
-const authenticatedRepoUrl = (repo: string): string => `https://github.com/${repo}.git`
+const authenticatedRepoUrl = githubGitUrl
 
 export const buildFetchCommandArgs = (repository: PushRepository): readonly string[] => [
   "fetch",

@@ -18,7 +18,9 @@ import {
   pushWithGit,
   resolvePushPlan,
   ShitRatPushError,
+  runAuthenticatedGit,
 } from "../git-push.js"
+import { createGitTokenFallback, githubGitUrl, GitTokenFallbackError } from "../git-token-fallback.js"
 import { attestPushedSha, withAttest } from "../attest.js"
 import { CiReadError, isFailingRun, readChecks, readJobLog, readPullRequestStatus, rerunWorkflowRun } from "../ci-reads.js"
 import { labelIssue, setCommitStatus } from "../labels-statuses.js"
@@ -234,7 +236,10 @@ const printFailure = (
   code: string,
   fix: string,
   nextActions: readonly NextAction[] = [],
-) => Console.log(json(failure(command, errorMessage(error), code, fix, nextActions)))
+) => Console.log(json({
+  ...failure(command, errorMessage(error), code, fix, nextActions),
+  ...(error instanceof GitTokenFallbackError ? error.auth : {}),
+}))
 
 // CI commands exit non-zero on failure so shell watches fail closed; the envelope carries the typed code.
 const printCiFailure = (command: string, error: unknown, code: string, fix: string) =>
@@ -607,19 +612,10 @@ const runGitDetailed = async (
   return { stdout, stderr }
 }
 
-const writeGitAskpass = async (authDir: string): Promise<string> => {
-  const askpassPath = path.join(authDir, "askpass.sh")
-  await writeFile(
-    askpassPath,
-    "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' x-access-token ;;\n  *) printf '%s\\n' \"$SHITRAT_GITHUB_TOKEN\" ;;\nesac\n",
-    { mode: 0o700 },
-  )
-  return askpassPath
-}
-
 interface EmptyRepositoryCommitResult {
   readonly sha: string
   readonly html_url: string
+  readonly gitAuth: ReturnType<ReturnType<typeof createGitTokenFallback>["result"]>
 }
 
 const commitFilesToEmptyRepository = (
@@ -627,13 +623,13 @@ const commitFilesToEmptyRepository = (
   targetBranch: string,
   message: string,
   preparedFiles: readonly PreparedCommitFile[],
-  installationToken: string,
+  installationToken: { readonly token: string; readonly permissions: Record<string, string> },
 ): Effect.Effect<EmptyRepositoryCommitResult, Error> =>
   Effect.tryPromise({
     try: async () => {
       const repoDir = await mkdtemp(path.join(tmpdir(), "shitrat-empty-repo-"))
-      const authDir = await mkdtemp(path.join(tmpdir(), "shitrat-git-auth-"))
-      let askpassPath = ""
+      const auth = createGitTokenFallback(repoRef.fullName, installationToken, () =>
+        Effect.runPromise(createInstallationToken(repoRef.owner)))
 
       try {
         for (const prepared of preparedFiles) {
@@ -647,8 +643,6 @@ const commitFilesToEmptyRepository = (
           await writeFile(targetPath, Buffer.from(prepared.base64, "base64"), { mode })
           if (prepared.gitMode === "100755") await chmod(targetPath, mode)
         }
-
-        askpassPath = await writeGitAskpass(authDir)
 
         await runGit(["init", "-b", targetBranch], { cwd: repoDir })
         await runGit(["config", "user.name", "shitratgit[bot]"], { cwd: repoDir })
@@ -667,29 +661,19 @@ const commitFilesToEmptyRepository = (
           },
         })
         const sha = await runGit(["rev-parse", "HEAD"], { cwd: repoDir })
-        await runGit(
-          [
-            "push",
-            `https://github.com/${repoRef.owner}/${repoRef.repo}.git`,
-            `HEAD:refs/heads/${targetBranch}`,
-          ],
-          {
-            cwd: repoDir,
-            env: {
-              GIT_ASKPASS: askpassPath,
-              GIT_TERMINAL_PROMPT: "0",
-              SHITRAT_GITHUB_TOKEN: installationToken,
-            },
-          },
-        )
+        await auth.run((token, checkedRepo) => runAuthenticatedGit(
+          ["push", "--no-verify", "--recurse-submodules=no", githubGitUrl(checkedRepo), `HEAD:refs/heads/${targetBranch}`],
+          repoDir,
+          token,
+        ))
 
         return {
           sha,
           html_url: `https://github.com/${repoRef.fullName}/commit/${sha}`,
+          gitAuth: auth.result(),
         }
       } finally {
         await rm(repoDir, { recursive: true, force: true })
-        await rm(authDir, { recursive: true, force: true })
       }
     },
     catch: (error) => (error instanceof Error ? error : new Error(String(error))),
@@ -1993,7 +1977,7 @@ export const commitFilesCmd = Command.make(
             targetBranch,
             message,
             preparedFiles,
-            token.token,
+            token,
           ).pipe(
             Effect.map((commit) => ({
               commit,
@@ -2105,6 +2089,7 @@ export const commitFilesCmd = Command.make(
           branch: targetBranch,
           created_branch: commitResult.createdBranch,
           empty_repository: commitResult.emptyRepository,
+          ...("gitAuth" in commitResult.commit ? commitResult.commit.gitAuth : {}),
           files: fileReceipts,
           file_count: preparedFiles.length,
           total_size: totalBytes,
@@ -2166,8 +2151,9 @@ export const pushCmd = Command.make(
     allowAnyAuthor: allowAnyAuthorOption,
     dryRun: dryRunOption,
   },
-  ({ repo, branch, repoDir, allowAnyAuthor, dryRun }) =>
-    Effect.gen(function* () {
+  ({ repo, branch, repoDir, allowAnyAuthor, dryRun }) => {
+    let auth: ReturnType<typeof createGitTokenFallback> | undefined
+    return Effect.gen(function* () {
       const repoRef = parseRepo(repo)
       const command = `push ${repoRef.fullName}`
       const repository = yield* Effect.tryPromise({
@@ -2180,8 +2166,11 @@ export const pushCmd = Command.make(
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
       })
       const token = yield* createInstallationToken(repoRef.owner, repoRef.repo)
+      const gitAuth = createGitTokenFallback(repoRef.fullName, token, () =>
+        Effect.runPromise(createInstallationToken(repoRef.owner)))
+      auth = gitAuth
       yield* Effect.tryPromise({
-        try: () => fetchPushRefs(repository, token.token),
+        try: () => gitAuth.run((value, checkedRepo) => fetchPushRefs({ ...repository, repo: checkedRepo }, value)),
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
       })
       const plan = yield* Effect.tryPromise({
@@ -2204,6 +2193,7 @@ export const pushCmd = Command.make(
             range: plan.range,
             actor: "shitratgit[bot]",
             note: "Local and origin branch tips already match; nothing to push.",
+            ...gitAuth.result(),
           },
           [statusAction],
         )
@@ -2211,7 +2201,7 @@ export const pushCmd = Command.make(
       }
 
       yield* Effect.tryPromise({
-        try: () => pushWithGit(repository, token.token, dryRun),
+        try: () => gitAuth.run((value, checkedRepo) => pushWithGit({ ...repository, repo: checkedRepo }, value, dryRun)),
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
       })
       const attest = dryRun ? undefined : yield* Effect.promise(() => attestPushedSha(repoRef.fullName, plan.newSha, { command: "push" }))
@@ -2229,6 +2219,7 @@ export const pushCmd = Command.make(
             ? { note: "git push --dry-run succeeded; no remote ref was changed." }
             : {}),
           ...withAttest(attest),
+          ...gitAuth.result(),
         },
         [statusAction],
       )
@@ -2254,9 +2245,10 @@ export const pushCmd = Command.make(
             "repo-dir": { value: repoDir, default: process.cwd() },
           },
         }
-        return printFailure(`push ${repo}`, error, code, fix, [retryAction])
+        return printFailure(`push ${repo}`, new GitTokenFallbackError(errorMessage(error), auth?.result() ?? { tokenScope: "repository", fallbackUsed: false }), code, fix, [retryAction])
       }),
-    ),
+    )
+  },
 ).pipe(Command.withDescription("Push existing local commits with ShitRat GitHub App auth"))
 
 export const mergeCmd = Command.make(
