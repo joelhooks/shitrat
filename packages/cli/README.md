@@ -251,6 +251,18 @@ Neither command retries or rolls back writes. If a second request or read-back f
 
 When a checkout exists, commit locally as `shitratgit[bot]`, let the repository's commit hooks run, and publish the unchanged commits with `shitrat push`. `push` fetches first, checks the checkout's `origin`, rejects non-bot outgoing authors unless `--allow-any-author` is explicit, and never amends, rebases, or force-pushes. It passes `--no-verify` and disables submodule recursion for authenticated Git commands so checkout-controlled hooks or nested repositories cannot inherit the short-lived installation token.
 
+### Temporary git token fallback (2026-10-27)
+
+On 2026-10-27, git over HTTPS refused repository-narrowed installation tokens while REST still accepted them. A token minted without a request body worked for the same repository. Permission-only narrowing also failed. The repository-scoped token already carries the app's full permission set, including workflows write; the fallback does not narrow permissions.
+
+`push` still tries the repository-scoped token first for each fetch and push. Only GitHub's `Repository not found` or HTTP 403 `Permission to <repo>.git denied to shitratgit[bot]` triggers one retry with a full installation token. Network failures, other 403s, non-fast-forward errors and branch protection do not trigger it. The empty-repository `commit-files` git push uses the same path.
+
+Before minting the broader token, REST must confirm the target owner/name with the scoped token and show push permission or a contents-write token grant. Git uses an HTTPS github.com URL built from that checked identity, never the checkout's remote URL. Credentialed targets and redirects are refused. Tokens stay in the child environment, not argv, and are redacted from child output. Immediately after the retry child exits, the CLI calls `DELETE /installation/token`, even on failure. A failed revoke adds a warning rather than failing a successful push.
+
+Success results include `tokenScope: "repository" | "installation"` and `fallbackUsed`; fallback failures carry these fields on the failure envelope. A fallback adds a `note`. If both git attempts fail, `push` retains `PUSH_FAILED` and names both failed attempts. Each fallback appends a token-free timestamp, repo and outcome to `$XDG_STATE_HOME/shitrat/git-token-fallback.jsonl` (default `~/.local/state/shitrat/git-token-fallback.jsonl`). Log failures warn without changing the git result.
+
+**Removal date: 2026-11-10, inclusive UTC.** Starting 2026-11-11T00:00:00Z, a scoped-token refusal fails with a prompt to recheck GitHub instead of minting a broader token. Remove the workaround when GitHub restores narrowed-token git access; do not silently extend this window.
+
 Use `commit-file` and `commit-files` for clone-less edits. They commit through the GitHub API with web-flow signing, so they cannot run local hooks. They remain useful for small remote-only changes, not normal worktree development.
 
 Review events:
