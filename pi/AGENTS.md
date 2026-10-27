@@ -58,7 +58,7 @@ When posting issue/PR comments:
 - Never pass multi-line markdown directly via `--body` in shell commands
 - Preview the exact comment text before posting
 - Post exactly one final comment unless the user explicitly asks for multiple comments
-- If a comment is malformed, delete it immediately, then post one corrected comment
+- If a comment is malformed, delete it immediately
 - Keep comments concise, technical, and in the user's tone
 
 When closing issues via commit:
