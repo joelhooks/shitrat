@@ -69,11 +69,12 @@ describe("pkce", () => {
     expect(url.searchParams.get("scope")).toBe("a b")
   })
 
-  test("default scopes include dm.read and keep the article write scopes", () => {
+  test("default scopes include dm.read, bookmark.read and the article write scopes", () => {
     expect(DEFAULT_SCOPES).toContain("dm.read")
     expect(DEFAULT_SCOPES).toContain("offline.access")
     expect(DEFAULT_SCOPES).toContain("tweet.write")
     expect(DEFAULT_SCOPES).toContain("media.write")
+    expect(DEFAULT_SCOPES).toContain("bookmark.read")
   })
 })
 
