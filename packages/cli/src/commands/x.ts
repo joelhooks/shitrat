@@ -10,7 +10,15 @@ import {
 } from "../x/draftjs.js"
 import { parseArticleLimitHeaders } from "../x/limits.js"
 import { errorMessage, failure, json, success, type NextAction } from "../response.js"
-import { readSecret } from "../secrets.js"
+import { readOptionalSecret, readSecret, writeAgentSecret } from "../secrets.js"
+import {
+  DEFAULT_REDIRECT_URI,
+  DEFAULT_SCOPES,
+  runAuth,
+  XAuthError,
+  parseCallback,
+  type Callback,
+} from "../x/oauth2.js"
 
 const accountOption = Options.text("account").pipe(
   Options.withDescription("X account handle used to namespace oauth2 secrets"),
@@ -390,6 +398,113 @@ const articleCmd = Command.make("article", {}, () =>
   ),
 ).pipe(Command.withSubcommands([convertCmd, draftCmd, publishCmd]))
 
+const redirectUriOption = Options.text("redirect-uri").pipe(
+  Options.withDescription("Loopback callback registered on the X app"),
+  Options.withDefault(DEFAULT_REDIRECT_URI),
+)
+
+const scopeOption = Options.text("scope").pipe(
+  Options.withDescription("OAuth2 scope to request; repeat to replace the default set"),
+  Options.repeated,
+)
+
+const noOpenOption = Options.boolean("no-open").pipe(
+  Options.withDescription("Print the authorize URL on stderr instead of opening a browser"),
+)
+
+const timeoutOption = Options.integer("timeout-seconds").pipe(
+  Options.withDescription("How long to wait for the browser callback"),
+  Options.withDefault(300),
+)
+
+const listenOnLoopback = (
+  redirectUri: string,
+  timeoutSeconds: number,
+): { readonly wait: () => Promise<Callback>; readonly stop: () => void } => {
+  const target = new URL(redirectUri)
+  if (target.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(target.hostname)) {
+    throw new XAuthError("X_BAD_REDIRECT", "redirect-uri must be an http loopback URL.")
+  }
+  let settle: (callback: Callback) => void = () => {}
+  const received = new Promise<Callback>((resolve) => {
+    settle = resolve
+  })
+  // Bind before the browser opens so a fast approval can't race the listener.
+  const server = Bun.serve({
+    hostname: target.hostname,
+    port: Number(target.port || 80),
+    fetch(request) {
+      const url = new URL(request.url)
+      if (url.pathname !== target.pathname) return new Response("Not found", { status: 404 })
+      settle(parseCallback(request.url))
+      return new Response("<p>ShitRat got it. You can close this tab.</p>", {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      })
+    },
+  })
+  const stop = () => void server.stop()
+  const wait = () => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new XAuthError("X_AUTH_TIMEOUT", `No callback within ${timeoutSeconds}s.`)),
+        timeoutSeconds * 1000,
+      )
+    })
+    return Promise.race([received, timeout]).finally(() => clearTimeout(timer))
+  }
+  return { wait, stop }
+}
+
+const authCmd = Command.make(
+  "auth",
+  {
+    account: accountOption,
+    redirectUri: redirectUriOption,
+    scope: scopeOption,
+    noOpen: noOpenOption,
+    timeoutSeconds: timeoutOption,
+  },
+  ({ account, redirectUri, scope, noOpen, timeoutSeconds }) => {
+    const command = `x auth --account ${account}`
+    const scopes = scope.length > 0 ? scope : [...DEFAULT_SCOPES]
+    return Effect.tryPromise({
+      try: () => {
+        const loopback = listenOnLoopback(redirectUri, timeoutSeconds)
+        return runAuth(
+          { account, redirectUri, scopes },
+          {
+            readSecret: (name) => Effect.runPromise(readOptionalSecret(name)),
+            writeSecret: async (name, value) => writeAgentSecret(name, value),
+            fetch: defaultXFetch,
+            openUrl: async (url) => {
+              // The CLI buffers console output for its JSON envelope; this prompt must reach the pane now.
+              await Bun.write(Bun.stderr, `Authorize @${account} on X:\n${url}\n`)
+              if (!noOpen) Bun.spawnSync(["open", url])
+            },
+            waitForCallback: loopback.wait,
+          },
+        ).finally(loopback.stop)
+      },
+      catch: (error) => error,
+    }).pipe(
+      Effect.flatMap((result) =>
+        printSuccess(command, result, [
+          { command: `shitrat x me --account ${account}`, description: "Confirm the stored token" },
+        ]),
+      ),
+      Effect.catchAll((error) =>
+        printFailure(
+          command,
+          error,
+          error instanceof XAuthError ? error.code : "X_AUTH_FAILED",
+          "Fix the named cause and rerun. Stored tokens change only after a verified @account token.",
+        ),
+      ),
+    )
+  },
+).pipe(Command.withDescription("Authorize X OAuth2 user context in the browser (PKCE) and store the tokens"))
+
 export const xCmd = Command.make("x", {}, () =>
   Console.log(
     json(
@@ -397,6 +512,7 @@ export const xCmd = Command.make("x", {}, () =>
         description: "X API commands for @account OAuth2 user context. Articles require Premium and tweet.write.",
         commands: {
           me: "shitrat x me --account joelhooks",
+          auth: "shitrat x auth --account joelhooks",
           convert: "shitrat x article convert --title <title> --html-file <path>",
           draft: "shitrat x article draft --title <title> --html-file <path> --dry-run",
           publish: "shitrat x article publish <article-id> --dry-run",
@@ -406,4 +522,4 @@ export const xCmd = Command.make("x", {}, () =>
       }),
     ),
   ),
-).pipe(Command.withSubcommands([meCmd, articleCmd]))
+).pipe(Command.withSubcommands([meCmd, authCmd, articleCmd]))
