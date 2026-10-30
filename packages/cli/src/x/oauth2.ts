@@ -2,8 +2,8 @@ import { createHash, randomBytes } from "node:crypto"
 import { oauth2SecretNames } from "./accounts.js"
 import { readJsonField, type XFetch, type XRequest } from "./client.js"
 
-// dm.read is the reason this flow exists. The write scopes keep the existing
-// media upload and article commands working after a re-consent.
+// dm.read is the reason this flow exists, and bookmark.read feeds the bookmark pilot.
+// The write scopes keep the existing media upload and article commands working after a re-consent.
 export const DEFAULT_SCOPES = [
   "tweet.read",
   "users.read",
@@ -11,6 +11,7 @@ export const DEFAULT_SCOPES = [
   "offline.access",
   "tweet.write",
   "media.write",
+  "bookmark.read",
 ] as const
 
 export const DEFAULT_REDIRECT_URI = "http://127.0.0.1:8721/callback"

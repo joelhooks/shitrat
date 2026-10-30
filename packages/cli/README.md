@@ -175,7 +175,7 @@ bun run src/cli.ts x me --account joelhooks
 
 `x auth` opens X's consent page with a PKCE (S256) challenge and waits on a loopback callback, `http://127.0.0.1:8721/callback` by default. That URL must be registered on the X app; pass `--redirect-uri` for another one. The authorize URL also prints on stderr straight away, so `--no-open` works in a pane without a browser. It gives up after `--timeout-seconds` (default 300).
 
-Default scopes are `tweet.read users.read dm.read offline.access tweet.write media.write`. The write scopes keep `x article` and cover uploads working after a re-consent. Repeat `--scope` to replace the set.
+Default scopes are `tweet.read users.read dm.read offline.access tweet.write media.write bookmark.read`. The write scopes keep `x article` and cover uploads working after a re-consent. Repeat `--scope` to replace the set.
 
 The stored tokens change only after every check passes: callback state matches, the exchange succeeds, every requested scope was granted, and `users/me` with the new token returns the expected `@account`. Anything else fails with a named code and writes nothing. The refresh token is written first, then the access token. Values go to `secrets` on stdin and are read back to confirm. The store has no multi-key transaction, so a failure between the two writes leaves a new refresh token with a stale access token; the next `x auth` run fixes it. Token values never appear in output.
 
