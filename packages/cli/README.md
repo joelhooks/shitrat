@@ -179,6 +179,8 @@ Default scopes are `tweet.read users.read dm.read offline.access tweet.write med
 
 The stored tokens change only after every check passes: callback state matches, the exchange succeeds, every requested scope was granted, and `users/me` with the new token returns the expected `@account`. Anything else fails with a named code and writes nothing. The refresh token is written first, then the access token. Values go to `secrets` on stdin and are read back to confirm. The store has no multi-key transaction, so a failure between the two writes leaves a new refresh token with a stale access token; the next `x auth` run fixes it. Token values never appear in output.
 
+`x refresh` trades the stored refresh token for a new access token: one request, no retry. X rotates refresh tokens, so the new one is written and read back before the access token, then `users/me` confirms it. A rejected refresh writes nothing; rerun `x auth`. Access tokens last about two hours, so run `x refresh` before any read that comes later than that.
+
 ### Runner group workflow policy
 
 `runner-group --workflow` accepts only workflows owned by `--org`, using `.github/workflows/<file>.yml` or `.yaml` and a full `@refs/heads/<branch>` or `@refs/tags/<tag>` ref. Wildcards, bare branches and commit SHAs are refused. Repeat the flag to allow more workflows. Readback must match the exact requested workflow set, regardless of order.
