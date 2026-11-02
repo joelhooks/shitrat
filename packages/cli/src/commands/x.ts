@@ -15,6 +15,7 @@ import {
   DEFAULT_REDIRECT_URI,
   DEFAULT_SCOPES,
   runAuth,
+  runRefresh,
   XAuthError,
   parseCallback,
   type Callback,
@@ -140,7 +141,7 @@ const meCmd = Command.make("me", { account: accountOption }, ({ account }) => {
         error,
         error instanceof XApiError && error.status === 401 ? "X_AUTH_EXPIRED" : "X_ME_FAILED",
         error instanceof XApiError && error.status === 401
-          ? "Refresh the OAuth2 user token, then retry."
+          ? "Run shitrat x refresh, then retry. If that fails, rerun shitrat x auth."
           : "Inspect the X API error and retry.",
       )
       return
@@ -505,6 +506,37 @@ const authCmd = Command.make(
   },
 ).pipe(Command.withDescription("Authorize X OAuth2 user context in the browser (PKCE) and store the tokens"))
 
+const refreshCmd = Command.make("refresh", { account: accountOption }, ({ account }) => {
+  const command = `x refresh --account ${account}`
+  return Effect.tryPromise({
+    try: () =>
+      runRefresh(
+        { account },
+        {
+          readSecret: (name) => Effect.runPromise(readOptionalSecret(name)),
+          writeSecret: async (name, value) => writeAgentSecret(name, value),
+          fetch: defaultXFetch,
+        },
+      ),
+    catch: (error) => error,
+  }).pipe(
+    Effect.flatMap((result) =>
+      printSuccess(command, result, [
+        { command: `shitrat x me --account ${account}`, description: "Confirm the stored token" },
+      ]),
+    ),
+    Effect.catchAll((error) =>
+      printFailure(
+        command,
+        error,
+        error instanceof XAuthError ? error.code : "X_REFRESH_FAILED",
+        "One refresh, no retry. If the refresh token is rejected, rerun shitrat x auth.",
+        [{ command: `shitrat x auth --account ${account}`, description: "Re-consent in the browser" }],
+      ),
+    ),
+  )
+}).pipe(Command.withDescription("Refresh the stored X OAuth2 access token once with the stored refresh token"))
+
 export const xCmd = Command.make("x", {}, () =>
   Console.log(
     json(
@@ -513,6 +545,7 @@ export const xCmd = Command.make("x", {}, () =>
         commands: {
           me: "shitrat x me --account joelhooks",
           auth: "shitrat x auth --account joelhooks",
+          refresh: "shitrat x refresh --account joelhooks",
           convert: "shitrat x article convert --title <title> --html-file <path>",
           draft: "shitrat x article draft --title <title> --html-file <path> --dry-run",
           publish: "shitrat x article publish <article-id> --dry-run",
@@ -522,4 +555,4 @@ export const xCmd = Command.make("x", {}, () =>
       }),
     ),
   ),
-).pipe(Command.withSubcommands([meCmd, authCmd, articleCmd]))
+).pipe(Command.withSubcommands([meCmd, authCmd, refreshCmd, articleCmd]))

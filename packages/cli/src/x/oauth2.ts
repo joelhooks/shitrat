@@ -194,3 +194,79 @@ export const runAuth = async (
     written: [names.refreshToken, names.accessToken],
   }
 }
+
+export const refreshRequest = (input: {
+  readonly refreshToken: string
+  readonly clientId: string
+  readonly clientSecret?: string | undefined
+}): XRequest => {
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: input.refreshToken,
+    client_id: input.clientId,
+  })
+  const headers: Record<string, string> = { "Content-Type": "application/x-www-form-urlencoded" }
+  if (input.clientSecret) {
+    headers.Authorization = `Basic ${Buffer.from(`${input.clientId}:${input.clientSecret}`).toString("base64")}`
+  }
+  return { method: "POST", url: TOKEN_URL, headers, body: body.toString() }
+}
+
+export type RefreshDeps = Pick<AuthDeps, "readSecret" | "writeSecret" | "fetch">
+
+export interface RefreshResult {
+  readonly user: { readonly id: unknown; readonly username: unknown }
+  readonly scopes: readonly string[]
+  readonly expiresIn?: number | undefined
+  readonly rotated: boolean
+  readonly written: readonly string[]
+}
+
+// One refresh, no retry. X rotates the refresh token, so the old one is dead the
+// moment this succeeds: the new refresh token is written (and read back) first.
+export const runRefresh = async (input: { readonly account: string }, deps: RefreshDeps): Promise<RefreshResult> => {
+  const names = oauth2SecretNames(input.account)
+  const clientId = await deps.readSecret(names.clientId)
+  if (!clientId) throw new XAuthError("MISSING_SECRET", `Missing required secret: ${names.clientId}`)
+  const refreshToken = await deps.readSecret(names.refreshToken)
+  if (!refreshToken) throw new XAuthError("MISSING_SECRET", `Missing required secret: ${names.refreshToken}`)
+  const clientSecret = await deps.readSecret(names.clientSecret)
+
+  const response = await deps.fetch(refreshRequest({ refreshToken, clientId, clientSecret }))
+  if (!response.ok) {
+    throw new XAuthError(
+      "X_REFRESH_FAILED",
+      `Refresh returned ${response.status}: ${response.text.slice(0, 300)}. Nothing was written; rerun x auth if the refresh token is dead.`,
+    )
+  }
+  const accessToken = readJsonField(response.json, ["access_token"])
+  const newRefresh = readJsonField(response.json, ["refresh_token"])
+  const scope = readJsonField(response.json, ["scope"])
+  const expiresIn = readJsonField(response.json, ["expires_in"])
+  if (typeof accessToken !== "string" || accessToken.length === 0) {
+    throw new XAuthError("X_TOKEN_MALFORMED", "Refresh response has no access_token. Nothing was written.")
+  }
+  const rotated = typeof newRefresh === "string" && newRefresh.length > 0 && newRefresh !== refreshToken
+
+  const written: string[] = []
+  if (rotated) {
+    await deps.writeSecret(names.refreshToken, newRefresh as string)
+    written.push(names.refreshToken)
+  }
+  await deps.writeSecret(names.accessToken, accessToken)
+  written.push(names.accessToken)
+
+  const me = await deps.fetch({
+    method: "GET",
+    url: "https://api.x.com/2/users/me",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  if (!me.ok) throw new XAuthError("X_ME_FAILED", `users/me returned ${me.status} with the refreshed token.`)
+  return {
+    user: { id: readJsonField(me.json, ["data", "id"]), username: readJsonField(me.json, ["data", "username"]) },
+    scopes: typeof scope === "string" ? scope.split(/\s+/).filter(Boolean) : [],
+    expiresIn: typeof expiresIn === "number" ? expiresIn : undefined,
+    rotated,
+    written,
+  }
+}
