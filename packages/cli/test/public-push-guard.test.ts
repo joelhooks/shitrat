@@ -8,6 +8,9 @@ import {
   judge,
   loadGuardConfig,
   logWaivers,
+  parseRepoAllow,
+  readRepoAllow,
+  REPO_ALLOW_PATH,
   rulesFor,
   scanMessage,
   scanPatch,
@@ -127,6 +130,34 @@ describe("public push guard on real git fixtures", () => {
     expect(rulesOf(await f.scan())).not.toContain("tailnet-hostname docs/setup.md:4")
   })
 
+  test("a hostname that is a common word matches only in a host shape", async () => {
+    const f = await fixture()
+    const lines = [
+      "the bellhop digest runs at nine", // 1 prose: allowed
+      "ssh bellhop uptime", // 2
+      "curl http://bellhop:8790/latest.json", // 3
+      "open bellhop.local in a browser", // 4
+      "mail ops@bellhop about it", // 5
+      "ssh -p 22 bellhop", // 6
+      "a quillery of bellhop quills", // 7 substrings and prose: allowed
+      "zorbhost is still a plain word match", // 8
+      "the digest listens on bellhop:8790", // 9
+    ]
+    await f.commit({ "docs/hosts.md": `${lines.join("\n")}\n` }, "feat: bellhop digest gets a quill")
+    const config = { privateHostnames: ["bellhop", "quill", "zorbhost"], hostContextOnly: ["Bellhop", "quill"] }
+    expect(rulesOf(await f.scan(config))).toEqual([
+      "tailnet-hostname docs/hosts.md:2",
+      "tailnet-hostname docs/hosts.md:3",
+      "tailnet-hostname docs/hosts.md:4",
+      "tailnet-hostname docs/hosts.md:5",
+      "tailnet-hostname docs/hosts.md:6",
+      "tailnet-hostname docs/hosts.md:8",
+      "tailnet-hostname docs/hosts.md:9",
+    ])
+    // Without the modifier, the word itself is a finding, commit subject included.
+    expect(rulesOf(await f.scan({ privateHostnames: ["bellhop"] }))).toContain("tailnet-hostname (commit message)")
+  })
+
   test("commit messages are scanned too", async () => {
     const f = await fixture()
     await f.commit({ "a.txt": "a\n" }, `deploy to ${tailnetName}`)
@@ -176,13 +207,56 @@ describe("public push guard on real git fixtures", () => {
   })
 })
 
+describe("repo allow file", () => {
+  type GetContent = (args: { owner: string; repo: string; path: string; ref?: string }) => Promise<{ data: unknown }>
+  const client = (getContent: GetContent) => ({ rest: { repos: { getContent } } })
+  const file = (text: string) => ({ data: { type: "file", encoding: "base64", content: Buffer.from(text).toString("base64") } })
+
+  test("it is read from the default branch only, and absent means no globs", async () => {
+    const asked: Array<string | undefined> = []
+    const globs = await readRepoAllow(
+      client(async ({ path: p, ref }) => {
+        asked.push(`${p}@${ref}`)
+        return file(JSON.stringify({ allowPublicPaths: [".brain/**", " site/** ", ""] }))
+      }),
+      { owner: "example", repo: "public" },
+      "main",
+    )
+    expect(asked).toEqual([`${REPO_ALLOW_PATH}@main`])
+    expect(globs).toEqual([".brain/**", "site/**"])
+    const missing = Object.assign(new Error("Not Found"), { status: 404 })
+    expect(await readRepoAllow(client(async () => { throw missing }), { owner: "e", repo: "p" }, "main")).toEqual([])
+    expect(await readRepoAllow(client(async () => file("{}")), { owner: "e", repo: "p" }, undefined)).toEqual([])
+  })
+
+  test("a fetch failure or a malformed file fails closed", async () => {
+    const boom = Object.assign(new Error("Server Error"), { status: 500 })
+    await expect(readRepoAllow(client(async () => { throw boom }), { owner: "e", repo: "p" }, "main")).rejects.toThrow("Server Error")
+    await expect(readRepoAllow(client(async () => ({ data: [] })), { owner: "e", repo: "p" }, "main")).rejects.toThrow("not a file")
+    expect(() => parseRepoAllow("{ nope")).toThrow(GuardConfigError)
+    expect(() => parseRepoAllow(JSON.stringify({ allowPublicPaths: [1] }))).toThrow(GuardConfigError)
+    expect(() => parseRepoAllow(JSON.stringify({ allowPublicPaths: ".brain/**" }))).toThrow(GuardConfigError)
+    expect(parseRepoAllow(undefined)).toEqual([])
+  })
+
+  test("repo globs waive a public-by-design .brain, but never a secret in it", async () => {
+    const f = await fixture()
+    await f.commit({ ".brain/site/page.svx": `see ${homePath}\n`, ".brain/site/leak.svx": `token ${ghToken}\n` })
+    const verdict = judge(await f.scan(), parseRepoAllow(JSON.stringify({ allowPublicPaths: [".brain/**"] })))
+    expect(verdict.blocking.map((b) => b.rule)).toEqual(["github-token"])
+    expect(verdict.waived.map((w) => w.rule).sort()).toEqual(["brain-path", "brain-path", "home-path"])
+  })
+})
+
 describe("guard config", () => {
   test("missing config means no hostname list; malformed config fails closed", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "shitrat-guard-config-"))
     dirs.push(dir)
-    expect(await loadGuardConfig(path.join(dir, "absent.json"))).toEqual({ privateHostnames: [] })
-    await writeFile(path.join(dir, "ok.json"), JSON.stringify({ privateHostnames: ["zorbhost"] }))
-    expect(await loadGuardConfig(path.join(dir, "ok.json"))).toEqual({ privateHostnames: ["zorbhost"] })
+    expect(await loadGuardConfig(path.join(dir, "absent.json"))).toEqual({ privateHostnames: [], hostContextOnly: [] })
+    await writeFile(path.join(dir, "ok.json"), JSON.stringify({ privateHostnames: ["zorbhost", "bellhop"], hostContextOnly: ["bellhop"] }))
+    expect(await loadGuardConfig(path.join(dir, "ok.json"))).toEqual({ privateHostnames: ["zorbhost", "bellhop"], hostContextOnly: ["bellhop"] })
+    await writeFile(path.join(dir, "badctx.json"), JSON.stringify({ privateHostnames: [], hostContextOnly: "bellhop" }))
+    await expect(loadGuardConfig(path.join(dir, "badctx.json"))).rejects.toBeInstanceOf(GuardConfigError)
     await writeFile(path.join(dir, "bad.json"), "{ nope")
     await expect(loadGuardConfig(path.join(dir, "bad.json"))).rejects.toBeInstanceOf(GuardConfigError)
     await writeFile(path.join(dir, "unreadable.json"), "{}")
