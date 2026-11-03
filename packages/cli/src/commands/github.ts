@@ -23,6 +23,7 @@ import {
   describeFinding,
   judge,
   loadGuardConfig,
+  readRepoAllow,
   logWaivers,
   refusalFix,
   rulesFor,
@@ -2229,12 +2230,16 @@ export const pushCmd = Command.make(
       }
 
       // Unknown visibility is treated as public: a needless scan costs a moment, a leak is permanent.
-      const visibility = yield* Effect.tryPromise(() =>
+      const repoInfo = yield* Effect.tryPromise(() =>
         octokit.rest.repos.get({ owner: repoRef.owner, repo: repoRef.repo }),
       ).pipe(
-        Effect.map((r) => r.data.visibility ?? (r.data.private ? "private" : "public")),
-        Effect.orElseSucceed(() => "unknown"),
+        Effect.map((r) => ({
+          visibility: r.data.visibility ?? (r.data.private ? "private" : "public"),
+          defaultBranch: r.data.default_branch as string | undefined,
+        })),
+        Effect.orElseSucceed(() => ({ visibility: "unknown", defaultBranch: undefined as string | undefined })),
       )
+      const visibility = repoInfo.visibility
       const guard = yield* Effect.tryPromise({
         try: async () => {
           if (visibility === "private" || visibility === "internal") return undefined
@@ -2244,7 +2249,8 @@ export const pushCmd = Command.make(
             ...scanMessage(p.commit, p.message, rules),
             ...scanPatch({ commit: p.commit, patch: p.patch }, rules),
           ])
-          const verdict = judge(findings, allowPublicPath)
+          const repoAllow = await readRepoAllow(octokit, repoRef, repoInfo.defaultBranch)
+          const verdict = judge(findings, [...allowPublicPath, ...repoAllow])
           if (verdict.blocking.length > 0) {
             const shown = verdict.blocking.slice(0, 25).map(describeFinding)
             const more = verdict.blocking.length > shown.length ? [`... and ${verdict.blocking.length - shown.length} more`] : []
@@ -2261,6 +2267,7 @@ export const pushCmd = Command.make(
                   branch: repository.branch,
                   range: plan.range,
                   allow: allowPublicPath,
+                  repoAllow,
                   waived: verdict.waived,
                   dryRun,
                 })
@@ -2269,6 +2276,7 @@ export const pushCmd = Command.make(
             visibility,
             scanned_commits: patches.length,
             waived: verdict.waived.length,
+            ...(repoAllow.length > 0 ? { repo_allow: repoAllow } : {}),
             ...(waiverLog ? { waiver_log: waiverLog } : {}),
           }
         },

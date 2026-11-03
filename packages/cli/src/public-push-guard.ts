@@ -32,6 +32,12 @@ export interface GuardFinding {
 
 export interface GuardConfig {
   readonly privateHostnames: readonly string[]
+  /**
+   * Private hostnames that are also common words ("bellhop", "quill"). These match only in a
+   * host shape (`//name`, `@name`, `ssh name`, `name:port`, `name.local`), so prose and
+   * commit subjects that use the word don't trip the rule.
+   */
+  readonly hostContextOnly?: readonly string[]
 }
 
 const rule = (
@@ -61,16 +67,26 @@ export const BUILT_IN_RULES: readonly GuardRule[] = [
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
 export const rulesFor = (config: GuardConfig): readonly GuardRule[] => {
-  const names = config.privateHostnames.map((name) => name.trim()).filter((name) => name.length > 0)
+  const clean = (list: readonly string[] | undefined) =>
+    (list ?? []).map((name) => name.trim().toLowerCase()).filter((name) => name.length > 0)
+  const names = clean(config.privateHostnames)
   if (names.length === 0) return BUILT_IN_RULES
+  const contextual = new Set(clean(config.hostContextOnly))
+  const alt = (list: string[]) => list.map(escapeRegExp).join("|")
+  const word = names.filter((name) => !contextual.has(name))
+  const hostShaped = names.filter((name) => contextual.has(name))
+  const branches = [
+    ...(word.length > 0 ? [`\\b(?:${alt(word)})\\b`] : []),
+    ...(hostShaped.length > 0
+      ? [
+          `(?:\\/\\/|@|\\b(?:ssh|scp|rsync|mosh)\\s+(?:-\\S+\\s+(?:[^-\\s]\\S*\\s+)?)*(?:[\\w.-]+@)?)(?:${alt(hostShaped)})\\b`,
+          `\\b(?:${alt(hostShaped)})(?::\\d{2,5}\\b|\\.(?:local|lan|home|internal|ts\\.net|tail[a-z0-9]+)\\b)`,
+        ]
+      : []),
+  ]
   return [
     ...BUILT_IN_RULES,
-    rule(
-      "tailnet-hostname",
-      "content",
-      new RegExp(`\\b(?:${names.map(escapeRegExp).join("|")})\\b`, "i"),
-      "a private fleet hostname (from the local guard config)",
-    ),
+    rule("tailnet-hostname", "content", new RegExp(branches.join("|"), "i"), "a private fleet hostname (from the local guard config)"),
   ]
 }
 
@@ -79,20 +95,70 @@ export const defaultConfigPath = () =>
 
 export class GuardConfigError extends Error {}
 
+const stringList = (value: unknown, field: string): string[] => {
+  if (value === undefined) return []
+  if (!(Array.isArray(value) && value.every((n) => typeof n === "string"))) {
+    throw new Error(`${field} must be an array of strings`)
+  }
+  return value as string[]
+}
+
+/**
+ * A public repo's own allow file. The push reads it from the repo's default branch on
+ * GitHub, which is already public and reviewed, never from the outgoing commits, so a
+ * push cannot waive its own leak; adding or widening the file is a push of its own.
+ * It waives only waivable findings; secrets are never waived.
+ */
+export const REPO_ALLOW_PATH = ".shitrat/public-allow.json"
+
+export const parseRepoAllow = (raw: string | undefined): string[] => {
+  if (raw === undefined) return []
+  try {
+    const parsed = JSON.parse(raw) as { allowPublicPaths?: unknown }
+    return stringList(parsed.allowPublicPaths, "allowPublicPaths").map((g) => g.trim()).filter((g) => g.length > 0)
+  } catch (error) {
+    throw new GuardConfigError(
+      `${REPO_ALLOW_PATH} on the default branch is not valid: ${error instanceof Error ? error.message : String(error)}. Fix it in its own push, or push with --allow-public-path.`,
+    )
+  }
+}
+
+/** The public repo's allow file from its default branch; absent means none. */
+export const readRepoAllow = async (
+  octokit: { rest: { repos: { getContent: (args: { owner: string; repo: string; path: string; ref?: string }) => Promise<{ data: unknown }> } } },
+  repoRef: { owner: string; repo: string },
+  defaultBranch: string | undefined,
+): Promise<string[]> => {
+  if (!defaultBranch) return []
+  const raw = await octokit.rest.repos
+    .getContent({ owner: repoRef.owner, repo: repoRef.repo, path: REPO_ALLOW_PATH, ref: defaultBranch })
+    .then(({ data }) => {
+      const file = data as { type?: string; content?: string; encoding?: string }
+      if (Array.isArray(data) || file.type !== "file" || typeof file.content !== "string") {
+        throw new Error(`${REPO_ALLOW_PATH} on ${defaultBranch} is not a file`)
+      }
+      return Buffer.from(file.content, (file.encoding as BufferEncoding | undefined) ?? "base64").toString("utf8")
+    })
+    .catch((error: { status?: number }) => {
+      if (error?.status === 404) return undefined
+      throw error
+    })
+  return parseRepoAllow(raw)
+}
+
 /** Missing file means no private hostname list; a present but unreadable file fails closed. */
 export const loadGuardConfig = async (configPath = defaultConfigPath()): Promise<GuardConfig> => {
   const raw = await readFile(configPath, "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return undefined
     throw new GuardConfigError(`cannot read ${configPath}: ${error.code ?? error.message}`)
   })
-  if (raw === undefined) return { privateHostnames: [] }
+  if (raw === undefined) return { privateHostnames: [], hostContextOnly: [] }
   try {
-    const parsed: unknown = JSON.parse(raw)
-    const names = (parsed as { privateHostnames?: unknown }).privateHostnames
-    if (names !== undefined && !(Array.isArray(names) && names.every((n) => typeof n === "string"))) {
-      throw new Error("privateHostnames must be an array of strings")
+    const parsed = JSON.parse(raw) as { privateHostnames?: unknown; hostContextOnly?: unknown }
+    return {
+      privateHostnames: stringList(parsed.privateHostnames, "privateHostnames"),
+      hostContextOnly: stringList(parsed.hostContextOnly, "hostContextOnly"),
     }
-    return { privateHostnames: (names as string[] | undefined) ?? [] }
   } catch (error) {
     throw new GuardConfigError(`${configPath} is not valid guard config: ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -205,7 +271,7 @@ export const refusalFix = (verdict: GuardVerdict, repo: string): string => {
   }
   if (verdict.blocking.some((f) => f.waivable)) {
     steps.push(
-      `For a known-safe false positive in a path rule, home path or hostname, retry with --allow-public-path '<glob>' (logged to ${allowLogPath()}).`,
+      `For a known-safe false positive in a path rule, home path or hostname, retry with --allow-public-path '<glob>' (logged to ${allowLogPath()}). For a path that is public by design, list its glob in ${REPO_ALLOW_PATH} under "allowPublicPaths" and land that file first; the guard reads it from the default branch.`,
     )
   }
   return steps.join(" ")
@@ -220,6 +286,7 @@ export const logWaivers = async (entry: {
   readonly branch: string
   readonly range: string
   readonly allow: readonly string[]
+  readonly repoAllow?: readonly string[]
   readonly waived: readonly GuardFinding[]
   readonly dryRun: boolean
 }): Promise<string> => {
@@ -239,6 +306,7 @@ export const logWaivers = async (entry: {
       range: entry.range,
       dry_run: entry.dryRun,
       allow: entry.allow,
+      ...(entry.repoAllow && entry.repoAllow.length > 0 ? { repo_allow: entry.repoAllow } : {}),
       waived: entry.waived.map((f) => ({ rule: f.rule, commit: f.commit, file: f.file, line: f.line })),
     }
     await handle.appendFile(`${JSON.stringify(line)}\n`)
