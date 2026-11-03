@@ -5,7 +5,6 @@ import { chmod, lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import {
-  createInstallationToken,
   createRepoOctokit,
   listInstallations,
   parseRepo,
@@ -16,9 +15,20 @@ import {
   fetchPushRefs,
   inspectPushRepository,
   pushWithGit,
+  readOutgoingPatches,
   resolvePushPlan,
   ShitRatPushError,
 } from "../git-push.js"
+import {
+  describeFinding,
+  judge,
+  loadGuardConfig,
+  logWaivers,
+  refusalFix,
+  rulesFor,
+  scanMessage,
+  scanPatch,
+} from "../public-push-guard.js"
 import { attestPushedSha, withAttest } from "../attest.js"
 import { CiReadError, isFailingRun, readChecks, readJobLog, readPullRequestStatus, rerunWorkflowRun } from "../ci-reads.js"
 import { labelIssue, setCommitStatus } from "../labels-statuses.js"
@@ -70,6 +80,13 @@ const repoDirOption = Options.text("repo-dir").pipe(
 
 const allowAnyAuthorOption = Options.boolean("allow-any-author").pipe(
   Options.withDescription("Allow outgoing commits not authored by shitratgit[bot]"),
+)
+
+const allowPublicPathOption = Options.text("allow-public-path").pipe(
+  Options.repeated,
+  Options.withDescription(
+    "Public repos only: waive a known-safe path, home-path or hostname finding in files matching this glob (logged). Secrets are never waived.",
+  ),
 )
 
 const messageOption = Options.text("message").pipe(
@@ -795,7 +812,7 @@ export const statusCmd = Command.make("status", { repo: repoArg }, ({ repo }) =>
           },
         },
         {
-          command: "push <repo> [--branch <name>] [--repo-dir <path>] [--allow-any-author] [--dry-run]",
+          command: "push <repo> [--branch <name>] [--repo-dir <path>] [--allow-any-author] [--allow-public-path <glob>]... [--dry-run]",
           description: "Push existing local commits with ShitRat GitHub App auth",
           params: {
             repo: { value: repoRef.fullName, required: true },
@@ -2164,9 +2181,10 @@ export const pushCmd = Command.make(
     branch: pushBranchOption,
     repoDir: repoDirOption,
     allowAnyAuthor: allowAnyAuthorOption,
+    allowPublicPath: allowPublicPathOption,
     dryRun: dryRunOption,
   },
-  ({ repo, branch, repoDir, allowAnyAuthor, dryRun }) =>
+  ({ repo, branch, repoDir, allowAnyAuthor, allowPublicPath, dryRun }) =>
     Effect.gen(function* () {
       const repoRef = parseRepo(repo)
       const command = `push ${repoRef.fullName}`
@@ -2179,7 +2197,7 @@ export const pushCmd = Command.make(
           }),
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
       })
-      const token = yield* createInstallationToken(repoRef.owner, repoRef.repo)
+      const { octokit, token } = yield* createRepoOctokit(repoRef)
       yield* Effect.tryPromise({
         try: () => fetchPushRefs(repository, token.token),
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
@@ -2210,6 +2228,53 @@ export const pushCmd = Command.make(
         return
       }
 
+      // Unknown visibility is treated as public: a needless scan costs a moment, a leak is permanent.
+      const visibility = yield* Effect.tryPromise(() =>
+        octokit.rest.repos.get({ owner: repoRef.owner, repo: repoRef.repo }),
+      ).pipe(
+        Effect.map((r) => r.data.visibility ?? (r.data.private ? "private" : "public")),
+        Effect.orElseSucceed(() => "unknown"),
+      )
+      const guard = yield* Effect.tryPromise({
+        try: async () => {
+          if (visibility === "private" || visibility === "internal") return undefined
+          const rules = rulesFor(await loadGuardConfig())
+          const patches = await readOutgoingPatches(repository, plan)
+          const findings = patches.flatMap((p) => [
+            ...scanMessage(p.commit, p.message, rules),
+            ...scanPatch({ commit: p.commit, patch: p.patch }, rules),
+          ])
+          const verdict = judge(findings, allowPublicPath)
+          if (verdict.blocking.length > 0) {
+            const shown = verdict.blocking.slice(0, 25).map(describeFinding)
+            const more = verdict.blocking.length > shown.length ? [`... and ${verdict.blocking.length - shown.length} more`] : []
+            throw new ShitRatPushError(
+              `Refusing to push private material to ${visibility} repo ${repoRef.fullName} (${verdict.blocking.length} finding(s)):\n${[...shown, ...more].join("\n")}`,
+              "PUBLIC_PUSH_REFUSED",
+              refusalFix(verdict, repoRef.fullName),
+            )
+          }
+          const waiverLog =
+            verdict.waived.length > 0
+              ? await logWaivers({
+                  repo: repoRef.fullName,
+                  branch: repository.branch,
+                  range: plan.range,
+                  allow: allowPublicPath,
+                  waived: verdict.waived,
+                  dryRun,
+                })
+              : undefined
+          return {
+            visibility,
+            scanned_commits: patches.length,
+            waived: verdict.waived.length,
+            ...(waiverLog ? { waiver_log: waiverLog } : {}),
+          }
+        },
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      })
+
       yield* Effect.tryPromise({
         try: () => pushWithGit(repository, token.token, dryRun),
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
@@ -2225,6 +2290,7 @@ export const pushCmd = Command.make(
           ...(dryRun ? { dry_run: true, would_push: plan.pushedCount } : {}),
           range: plan.range,
           actor: "shitratgit[bot]",
+          public_push_guard: guard ?? { visibility, scanned: false, note: "private repo: not scanned" },
           ...(dryRun
             ? { note: "git push --dry-run succeeded; no remote ref was changed." }
             : {}),
@@ -2243,11 +2309,15 @@ export const pushCmd = Command.make(
           command:
             code === "AUTHOR_NOT_BOT"
               ? "push <repo> [--branch <name>] [--repo-dir <path>] --allow-any-author"
-              : "push <repo> [--branch <name>] [--repo-dir <path>] [--dry-run]",
+              : code === "PUBLIC_PUSH_REFUSED"
+                ? "push <repo> [--branch <name>] [--repo-dir <path>] [--allow-public-path <glob>]... --dry-run"
+                : "push <repo> [--branch <name>] [--repo-dir <path>] [--dry-run]",
           description:
             code === "AUTHOR_NOT_BOT"
               ? "Retry only if the outgoing non-bot authors are intentional"
-              : "Retry the local branch push",
+              : code === "PUBLIC_PUSH_REFUSED"
+                ? "After cleaning the outgoing commits, dry-run again; waive only a known-safe non-secret false positive"
+                : "Retry the local branch push",
           params: {
             repo: { value: repo, required: true },
             branch: { description: "Defaults to the checked-out branch" },
