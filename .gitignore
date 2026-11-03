@@ -32,6 +32,8 @@ report.*.json
 .pi/
 .brain-private.svx
 .brain-private/
+# Brain lives in the private dev repo joelhooks/shitrat-dev
+.brain/
 
 # editors/os
 .idea

@@ -4,7 +4,7 @@ ShitRat is a deployable agent familiar monorepo. This repo can commit its local 
 
 ## Committed Brain boundary
 
-Use `BRAIN.md` and `.brain/` for durable, source-grounded project knowledge that is safe to commit with the repo.
+Use `BRAIN.md` and `.brain/` for durable, source-grounded project knowledge. This repo is public, so `.brain/` is a checkout of the private dev repo `joelhooks/shitrat-dev` (internal git, not GitHub) and is ignored here; commit Brain edits there, never to this repo.
 
 Do **not** put sensitive, personal, or private operational details in this repo Brain, including:
 

@@ -2,9 +2,11 @@
 
 Use pi-notes as an agent-connected project brain, not a generic notes site.
 
-## Committed repo Brain boundary
+## Where the Brain lives
 
-This monorepo commits `BRAIN.md` and `.brain/` as project memory. Keep it safe for the repo: no secrets, raw Slack content, private hostnames, personal details, customer/user data, private screenshots, or sensitive operational receipts.
+This repo is public, so `.brain/` is not committed here. It lives in the private dev repo `joelhooks/shitrat-dev` on the internal git server (not GitHub), with its full history. Check it out as `.brain/` in your working copy; `.gitignore` keeps it out of this repo, and `shitrat push` refuses `.brain/` paths bound for a public repo.
+
+Only `BRAIN.md` stays here. Keep it free of secrets, raw Slack content, private hostnames, personal details, customer/user data, private screenshots and sensitive operational receipts.
 
 Private durable context belongs in the global/system Brain outside this repo. It may be backed by a separate private repo; treat it as the private memory layer, not local scratch. Reference private context here only in sanitized form.
 
