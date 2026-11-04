@@ -31,7 +31,7 @@ import {
   scanPatch,
 } from "../public-push-guard.js"
 import { attestPushedSha, withAttest } from "../attest.js"
-import { CiReadError, isFailingRun, readChecks, readJobLog, readPullRequestStatus, rerunWorkflowRun } from "../ci-reads.js"
+import { CiReadError, isFailingRun, readChecks, readJobLog, readPullRequestStatus, rerunWorkflowRun, setWorkflowState, type WorkflowAction } from "../ci-reads.js"
 import { labelIssue, setCommitStatus } from "../labels-statuses.js"
 import { createAnnotatedTag, createGitHubRelease, GitHubReleaseError } from "../github-releases.js"
 import { convertPullRequestToDraft, enqueuePullRequest, isMergeQueueRequired, readyPullRequest } from "../merge-queue.js"
@@ -1659,6 +1659,45 @@ export const runLogCmd = Command.make("run-log", { repo: repoArg, jobId: jobIdAr
     ),
   ),
 ).pipe(Command.withDescription("Read a GitHub Actions job log as ShitRat; needs Actions: read on the app"))
+
+const workflowStateCmd = (action: WorkflowAction) => Command.make(
+  action,
+  {
+    repo: repoArg,
+    workflow: Args.text({ name: "workflow" }).pipe(Args.withDescription("Workflow file name (deploy.yml) or numeric id")),
+    dryRun: Options.boolean("dry-run").pipe(Options.withDescription("Read the workflow and preview its target state without writing")),
+  },
+  ({ repo, workflow, dryRun }) => Effect.gen(function* () {
+    const repoRef = parseRepo(repo)
+    const { octokit, token } = yield* createRepoOctokit(repoRef)
+    const result = yield* Effect.tryPromise({
+      try: () => setWorkflowState(octokit, { owner: repoRef.owner, repo: repoRef.repo }, workflow, action, dryRun),
+      catch: toError,
+    })
+    const params = { repo: { value: repoRef.fullName, required: true }, workflow: { value: workflow, required: true } }
+    yield* printSuccess(`workflow ${action} ${repoRef.fullName} ${workflow}`, {
+      repo: repoRef.fullName,
+      ...result,
+      dry_run: dryRun,
+      github_write: result.changed,
+      ...(dryRun ? {} : { actor: "shitratgit[bot]", installation_id: token.installationId }),
+    }, [{
+      command: `workflow ${action} <repo> <workflow>${dryRun ? "" : " --dry-run"}`,
+      description: dryRun ? `Apply the workflow ${action} as ShitRat` : "Read the workflow state again without writing",
+      params,
+    }])
+  }).pipe(Effect.catchAll((error) => printCiFailure(
+    `workflow ${action} ${repo} ${workflow}`,
+    error,
+    "WORKFLOW_STATE_FAILED",
+    "Verify the workflow file name or id and grant the shitratgit app Actions: write on this repository.",
+  ))),
+).pipe(Command.withDescription(`${action === "enable" ? "Enable" : "Disable"} a GitHub Actions workflow as ShitRat; needs Actions: write on the app`))
+
+export const workflowCmd = Command.make("workflow").pipe(
+  Command.withDescription("Enable or disable GitHub Actions workflows"),
+  Command.withSubcommands([workflowStateCmd("enable"), workflowStateCmd("disable")]),
+)
 
 export const rerunCmd = Command.make(
   "rerun",
