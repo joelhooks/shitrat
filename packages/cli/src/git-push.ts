@@ -1,4 +1,5 @@
 import path from "node:path"
+import { GitHubCellError, isCellPlaceholder, withCellForward } from "./github-cell.js"
 
 export const SHITRAT_GIT_AUTHOR = {
   name: "shitratgit[bot]",
@@ -39,6 +40,7 @@ interface GitRunOptions {
   readonly cwd: string
   readonly env?: Record<string, string>
   readonly sensitiveValues?: readonly string[]
+  readonly cell?: boolean
 }
 
 const redact = (text: string, sensitiveValues: readonly string[]): string =>
@@ -51,9 +53,13 @@ const runGitResult = async (
   args: readonly string[],
   options: GitRunOptions,
 ): Promise<GitResult> => {
+  const env = { ...process.env, ...options.env }
+  if (options.cell) {
+    for (const key of ["SC_IDENTITY_JSON", "SC_PASS_FILE", "SHITRAT_GITHUB_PRIVATE_KEY", "SHITRAT_PUSH_TOKEN", "SHITRAT_GITHUB_TOKEN"]) delete env[key]
+  }
   const proc = Bun.spawn(["git", ...args], {
     cwd: options.cwd,
-    env: { ...process.env, ...options.env },
+    env,
     stdout: "pipe",
     stderr: "pipe",
   })
@@ -109,11 +115,52 @@ export const buildAuthenticatedGitInvocation = (
   },
 })
 
+export const buildCellGitInvocation = (input: {
+  readonly args: readonly string[]
+  readonly placeholder: string
+  readonly origin: string
+}): AuthenticatedGitInvocation => {
+  if (!isCellPlaceholder(input.placeholder) || !/^http:\/\/127\.0\.0\.1:\d+$/.test(input.origin)) {
+    throw new GitHubCellError("configuration")
+  }
+  const credential = input.placeholder.slice("{{secret:".length, -2)
+  return {
+    args: [
+      "-c", "core.hooksPath=/dev/null",
+      "-c", "protocol.allow=never",
+      "-c", "protocol.http.allow=always",
+      "-c", "credential.helper=",
+      "-c", "http.followRedirects=false",
+      "-c", "http.extraHeader=",
+      "-c", `http.${input.origin}/.extraHeader=Authorization: {{secret-basic:user=x-access-token,password=${credential}}}`,
+      ...input.args.map((arg) => arg.startsWith("https://github.com/") ? `${input.origin}/${arg.slice("https://github.com/".length)}` : arg),
+    ],
+    env: { ...AUTHENTICATED_GIT_CONFIG_ENV, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/usr/bin/false", GIT_TRACE: "0", GIT_TRACE_CURL: "0", GIT_CURL_VERBOSE: "0" },
+  }
+}
+
+export const runCellGit = async (input: {
+  readonly args: readonly string[]
+  readonly cwd: string
+  readonly placeholder: string
+}): Promise<GitResult> => runAuthenticatedGit(input.args, input.cwd, input.placeholder)
+
 const runAuthenticatedGit = async (
   args: readonly string[],
   cwd: string,
   installationToken: string,
 ): Promise<GitResult> => {
+  if (isCellPlaceholder(installationToken)) {
+    return withCellForward({
+      host: "github.com",
+      run: async (origin) => {
+        const invocation = buildCellGitInvocation({ args, placeholder: installationToken, origin })
+        const result = await runGitResult(invocation.args, { cwd, env: invocation.env, cell: true })
+        if (result.exitCode !== 0) throw new GitHubCellError("refused")
+        return result
+      },
+    })
+  }
   const invocation = buildAuthenticatedGitInvocation(args, installationToken)
   const result = await runGitResult(invocation.args, {
     cwd,

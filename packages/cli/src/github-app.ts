@@ -4,6 +4,7 @@ export type GitHubOctokit = Octokit
 import { Effect } from "effect"
 import { createSign } from "node:crypto"
 import { readOptionalSecret, readSecret } from "./secrets.js"
+import { cellFetch, cellPlaceholder, GitHubCellError, isCellPlaceholder, prepareCell, requireDirectGitHub, selectGitHubPath } from "./github-cell.js"
 
 export interface RepoRef {
   readonly owner: string
@@ -50,6 +51,7 @@ const parseInstallationsJson = (raw: string | undefined): Record<string, number>
 }
 
 export const loadConfig = Effect.gen(function* () {
+  yield* Effect.try({ try: requireDirectGitHub, catch: (error) => error instanceof GitHubCellError ? error : new GitHubCellError("configuration") })
   const appId = yield* readSecret("shitrat_github_app_id")
   const privateKey = yield* readSecret("shitrat_github_private_key")
   const clientId = yield* readOptionalSecret("shitrat_github_client_id")
@@ -170,16 +172,22 @@ interface InstallationTokenResponse {
   readonly repository_selection?: string
 }
 
-export interface InstallationTokenResult {
-  readonly installationId: number
-  readonly token: string
-  readonly expiresAt: string
-  readonly permissions: Record<string, string>
-  readonly repositorySelection?: string
-}
-
 export const createInstallationToken = (owner: string, repository?: string) =>
   Effect.gen(function* () {
+    const cell = yield* Effect.tryPromise({
+      try: () => selectGitHubPath({ cell: async () => { await prepareCell(owner); return true }, direct: async () => false }),
+      catch: (error) => error instanceof GitHubCellError ? error : new GitHubCellError("client"),
+    })
+    if (cell) {
+      const permissions: Record<string, string> = {}
+      return {
+        token: cellPlaceholder(owner),
+        installationId: undefined,
+        expiresAt: undefined,
+        permissions,
+        repositorySelection: undefined,
+      }
+    }
     const config = yield* loadConfig
     const installationId = yield* resolveInstallationId(owner)
     const jwt = createJwt(config)
@@ -201,8 +209,14 @@ export const createInstallationToken = (owner: string, repository?: string) =>
     }
   })
 
+export type InstallationTokenResult = Effect.Effect.Success<ReturnType<typeof createInstallationToken>>
+
+export const createTokenOctokit = (token: string): Octokit => isCellPlaceholder(token)
+  ? new Octokit({ auth: token, request: { fetch: cellFetch }, log: { debug() {}, info() {}, warn() {}, error() {} } })
+  : new Octokit({ auth: token })
+
 export const createRepoOctokit = (repoRef: RepoRef) =>
   Effect.gen(function* () {
     const token = yield* createInstallationToken(repoRef.owner, repoRef.repo)
-    return { octokit: new Octokit({ auth: token.token }), token }
+    return { octokit: createTokenOctokit(token.token), token }
   })
