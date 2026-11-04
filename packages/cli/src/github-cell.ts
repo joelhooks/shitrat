@@ -238,7 +238,12 @@ export const withCellForward = <T>(input: {
 })
 
 export const cellFetch: typeof fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
-  const url = new URL(input instanceof Request ? input.url : input)
+  let url: URL
+  try {
+    url = new URL(input instanceof Request ? input.url : input)
+  } catch {
+    throw new GitHubCellError("unsupported", "The cell route requires an absolute HTTPS api.github.com URL.")
+  }
   if (url.protocol !== "https:" || url.hostname !== "api.github.com" || url.port || url.username || url.password) {
     throw new GitHubCellError("unsupported")
   }
@@ -259,11 +264,15 @@ export const cellFetch: typeof fetch = Object.assign(async (input: string | URL 
       })
       const body = await response.arrayBuffer()
       if (response.status >= 300 && response.status < 400) throw new GitHubCellError("refused")
-      return new Response(response.status === 204 || response.status === 205 || response.status === 304 ? null : body, {
+      const buffered = new Response(response.status === 204 || response.status === 205 || response.status === 304 ? null : body, {
         status: response.status,
         statusText: response.statusText,
         headers: response.headers,
       })
+      // A constructed Response has url="". Octokit pagination parses response.url,
+      // even on a final page. Expose the logical GitHub URL, never the loopback URL.
+      Object.defineProperty(buffered, "url", { value: url.href })
+      return buffered
     },
   })
 }, { preconnect: fetch.preconnect })
