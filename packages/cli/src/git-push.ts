@@ -429,3 +429,38 @@ export const pushWithGit = async (
     repository.gitRoot,
     installationToken,
   )
+
+export interface OutgoingPatch {
+  readonly commit: string
+  readonly message: string
+  readonly patch: string
+}
+
+/** Each outgoing commit's own changes; merges show only what the merge itself introduced. */
+export const readOutgoingPatches = async (
+  repository: PushRepository,
+  plan: PushPlan,
+): Promise<readonly OutgoingPatch[]> =>
+  Promise.all(
+    plan.commits.map(async ({ sha }) => {
+      const message = await runGit(["show", "-s", "--format=%B", sha], { cwd: repository.gitRoot })
+      const patch = await runGit(
+        [
+          "-c",
+          "core.quotePath=false",
+          "show",
+          "--format=",
+          "--patch",
+          "--unified=0",
+          "--no-renames",
+          "--no-color",
+          "--no-ext-diff",
+          "--no-textconv",
+          "--diff-merges=remerge",
+          sha,
+        ],
+        { cwd: repository.gitRoot },
+      )
+      return { commit: sha, message, patch }
+    }),
+  )

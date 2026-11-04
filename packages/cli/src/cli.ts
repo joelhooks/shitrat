@@ -46,6 +46,7 @@ import {
 } from "./commands/github.js"
 import { runnerGroupCmd, runnerGroupsCmd, runnerRemoveCmd, runnersCmd, runnerTokenCmd, runnerTokenInvoked } from "./commands/runners.js"
 import { deleteBranchCmd } from "./commands/delete-branch.js"
+import { cancelRunsCmd } from "./commands/cancel-runs.js"
 import { inboxCmd } from "./commands/inbox.js"
 import { xCmd } from "./commands/x.js"
 import { errorMessage, failure, json, success } from "./response.js"
@@ -93,6 +94,7 @@ const root = Command.make("shitrat", {}, () =>
               pr_status: "shitrat pr-status <owner/repo> <pull-number>",
               run_log: "shitrat run-log <owner/repo> <job-id> [--tail <lines>]",
               rerun: "shitrat rerun <owner/repo> <run-id> [--failed] [--dry-run]",
+              cancel_runs: "shitrat cancel-runs <owner/repo> --workflow <file> --created-before <iso> [--status pending|queued|waiting...] [--max <n>] [--log <path>] [--dry-run|--yes]",
               runner_token: "shitrat runner-token --org <org> (token-only stdout; expiry on stderr)",
               runner_group: "shitrat runner-group --org <org> --name <name> --repo <owner/repo> [--dry-run]",
               runner_groups: "shitrat runner-groups --org <org> [--name <name>]",
@@ -316,6 +318,7 @@ const root = Command.make("shitrat", {}, () =>
     prStatusCmd,
     runLogCmd,
     rerunCmd,
+    cancelRunsCmd,
     runnerTokenCmd,
     runnerGroupCmd,
     runnerGroupsCmd,

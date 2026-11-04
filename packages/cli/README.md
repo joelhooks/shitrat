@@ -167,7 +167,21 @@ bun run src/cli.ts merge-pr joelhooks/shitrat-cli 123 --method squash
 
 # Inspect an X Article payload without contacting X
 bun run src/cli.ts x article draft --title "The past blocked the future" --html-file ./post.html --dry-run
+
+# Re-authorize the X OAuth2 user token in the browser (PKCE), then confirm it
+bun run src/cli.ts x auth --account joelhooks
+bun run src/cli.ts x me --account joelhooks
 ```
+
+### X OAuth2 authorization
+
+`x auth` opens X's consent page with a PKCE (S256) challenge and waits on a loopback callback, `http://127.0.0.1:8721/callback` by default. That URL must be registered on the X app; pass `--redirect-uri` for another one. The authorize URL also prints on stderr straight away, so `--no-open` works in a pane without a browser. It gives up after `--timeout-seconds` (default 300).
+
+Default scopes are `tweet.read users.read dm.read offline.access tweet.write media.write bookmark.read`. The write scopes keep `x article` and cover uploads working after a re-consent. Repeat `--scope` to replace the set.
+
+The stored tokens change only after every check passes: callback state matches, the exchange succeeds, every requested scope was granted, and `users/me` with the new token returns the expected `@account`. Anything else fails with a named code and writes nothing. The refresh token is written first, then the access token. Values go to `secrets` on stdin and are read back to confirm. The store has no multi-key transaction, so a failure between the two writes leaves a new refresh token with a stale access token; the next `x auth` run fixes it. Token values never appear in output.
+
+`x refresh` trades the stored refresh token for a new access token: one request, no retry. X rotates refresh tokens, so the new one is written and read back before the access token, then `users/me` confirms it. A rejected refresh writes nothing; rerun `x auth`. Access tokens last about two hours, so run `x refresh` before any read that comes later than that.
 
 ### Runner group workflow policy
 
@@ -202,9 +216,40 @@ Each branch is checked serially. The command refuses the repository's default br
 
 Confirmed writes re-read the ref immediately before DELETE. A changed or disappeared SHA returns `BranchMoved`. Deletion succeeds only after a ref GET returns HTTP 404. GitHub has no conditional-SHA DELETE: another writer can still move the ref after the last read, so keep branch writers paused during cleanup. A failed readback can leave a real deletion; inspect state rather than retrying blindly. `github_write` reports whether any DELETE was attempted, not whether every deletion succeeded.
 
+### Branches preserved by a tag
+
+```bash
+# Preview. One --branch only; the tag is a short name, not refs/tags/...
+bun run src/cli.ts delete-branch --branch dist/abc1234 --preserved-by-tag dist/abc1234 example/project
+bun run src/cli.ts delete-branch --branch dist/abc1234 --preserved-by-tag dist/abc1234 --yes example/project
+```
+
+Some branches never merge into the default branch, such as a parentless dist commit. GitHub answers `compare` on unrelated histories with HTTP 404, so the normal merge check fails. `--preserved-by-tag <tag>` replaces only that merge check, and makes no compare call. The command reads `GET /repos/{owner}/{repo}/git/ref/tags/{tag}` and peels it to a commit. A lightweight tag is its own commit. An annotated tag follows `GET .../git/tags/{sha}` through at most five tag objects. The peeled commit must equal the branch SHA exactly.
+
+Refusals: a missing tag is `TagMissing`; a different commit is `TagMismatch`, naming both SHAs; a tag that ends at a tree or blob is `TagNotCommit`; more than five nested tag objects is `TagPeelTooDeep`. With `--yes`, the tag is re-read and re-peeled right after the branch re-read and before DELETE. A missing tag or a different peeled SHA refuses `TagMoved`. Every other guard is unchanged: default-branch refusal, fail-closed protection, open-PR preflight, `BranchMoved`, the 404 readback, dry run by default and the audit rules. `--preserved-by-tag` with `--branches-file` or a repeated `--branch` is a usage error before any request. Tag reads need Contents: read. Records keep `compare_status: null` and add `preserved_by_tag`, `tag_object_sha` (what the tag ref points at) and `tag_peeled_sha`. Without the flag, output is unchanged.
+
 Every branch result, including previews and refusals, appends a JSONL record with repo, branch, SHA, compare status, outcome, timestamp and CLI version. The default log is `~/.local/state/shitrat/branch-deletes.jsonl`. Use `--log <path>` to choose another file. The parent directory must have mode 0700; newly created directories use 0700. The file uses 0600. Existing logs are appended, never truncated; symlink log files and non-private parent directories are refused before deletion. Log writes are flushed after each branch. Audit failures stop the batch, because continuing could delete branches without receipts.
 
 The JSON envelope includes per-branch results and outcome counts, even when `ok` is false. A refusal or failure makes the exit code nonzero without stopping later branches. A rate limit honors `Retry-After` once through the same installation client; a repeated limit stops further requests with `RateLimited` and logs the remaining branches as failed. A Retry-After longer than five minutes also stops immediately, without sleeping or retrying; the typed error includes the reset time in its message and `reset_at` field. Short waits still retry once. Tests use fake HTTP only.
+
+## Cancel stale waiting runs
+
+```bash
+# Preview only. Lists pending, queued and waiting preview.yml runs created before the cutoff.
+bun run src/cli.ts cancel-runs --workflow preview.yml --created-before 2026-10-26T00:00:00Z --dry-run example/project
+# After reviewing the preview, confirm the same inputs.
+bun run src/cli.ts cancel-runs --workflow preview.yml --created-before 2026-10-26T00:00:00Z --yes example/project
+```
+
+`cancel-runs` clears runs that are stuck waiting in a workflow's concurrency queue. GitHub caps that queue, and a full queue makes new runs fail at creation with no jobs. The command defaults to dry run. `--yes` permits cancellation; `--dry-run` always wins, even next to `--yes`. `--workflow` takes the workflow file name and `--created-before` takes an ISO-8601 timestamp with a timezone. Both are required, and a future cutoff is refused, so there is no cancel-everything form. The installation token needs Actions: read for previews and Actions: write for cancellation. No App permissions are changed by this command.
+
+`--status` is repeatable and defaults to `pending`, `queued` and `waiting`. Any other value, including `in_progress`, `requested` and completed states, refuses before authentication: cancelling a started run can kill a deploy or preview mid-apply. `--max` defaults to 200 and cannot exceed 500. Runs are listed per status from `GET /repos/{owner}/{repo}/actions/workflows/{file}/runs`, paged, deduplicated, kept only when `created_at` is strictly before the cutoff, and processed oldest first. The result reports `skipped_after_cutoff` and `remaining_over_max`.
+
+Each run is checked serially. A listed run whose status is outside the allowed set refuses as `refused:StatusNotWaiting` without a request. Confirmed writes re-read the run immediately before `POST .../actions/runs/{id}/cancel`; a run that has left the waiting set refuses as `refused:StatusChanged`. Cancellation succeeds only when a readback shows `completed` with conclusion `cancelled`, within five reads about two seconds apart. Anything else is `failed:ReadbackMismatch`. GitHub has no conditional cancel, so a run can still start between the last read and the POST; a failed readback can still leave a real cancellation, so inspect the run rather than resending blindly. `github_write` reports whether any POST was sent.
+
+Every processed run appends a JSONL record with repo, run id, workflow, head SHA, `created_at`, `status_before`, outcome (`cancelled`, `would-cancel`, `refused:<code>` or `failed:<code>`), timestamp and CLI version. The default log is `~/.local/state/shitrat/run-cancels.jsonl`; `--log <path>` chooses another file. The audit rules match `delete-branch`: a 0700 parent directory, a 0600 file, append-only, symlinks refused, and an audit failure stops the batch before any cancel.
+
+The JSON envelope includes per-run results and outcome counts. A refusal or failure makes the exit code nonzero without stopping later runs. Failures name the endpoint, HTTP status and `actions: write`, without GitHub response bodies or credentials. Rate limits use the same capped Retry-After handling as `delete-branch`: one short wait through the same installation client, then `RateLimited` for the remaining runs. Tests use fake HTTP only.
 
 ## Tags and releases
 

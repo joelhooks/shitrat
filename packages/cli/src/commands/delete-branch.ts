@@ -15,6 +15,7 @@ type Outcome = "deleted" | "dryRun" | "alreadyAbsent" | "refused" | "failed"
 type BranchResult = {
   repo: string; branch: string; sha: string | null; compare_status: string | null
   outcome: Outcome; timestamp: string; cli_version: string; delete_attempted: boolean
+  preserved_by_tag?: string; tag_object_sha?: string | null; tag_peeled_sha?: string | null
   error?: { code: string; message: string; reset_at?: string }
 }
 const fail = (code: string, message: string): never => { throw new BranchDeleteError(code, message) }
@@ -52,15 +53,34 @@ const request = async <A>(endpoint: string, run: () => Promise<A>, absent = fals
   }
 }
 
+const validRefName = (name: string) => !(!name || name.startsWith("refs/") || name === "@" || /[\x00-\x20\x7f~^:?*\[\\]/.test(name) ||
+  name.includes("..") || name.includes("@{") || name.endsWith(".") ||
+  name.split("/").some((part) => !part || part.startsWith(".") || part.endsWith(".lock")))
 const validBranch = (branch: string) => {
-  if (!branch || branch.startsWith("refs/") || branch === "@" || /[\x00-\x20\x7f~^:?*\[\\]/.test(branch) ||
-    branch.includes("..") || branch.includes("@{") || branch.endsWith(".") ||
-    branch.split("/").some((part) => !part || part.startsWith(".") || part.endsWith(".lock"))) {
-    fail("InvalidBranch", "Pass a valid branch name, not a refs/ prefixed ref.")
-  }
+  if (!validRefName(branch)) fail("InvalidBranch", "Pass a valid branch name, not a refs/ prefixed ref.")
 }
 
-const deleteOne = async (octokit: GitHubOctokit, repo: RepoRef, defaultBranch: string, result: BranchResult, yes: boolean) => {
+const tagCodes = ["TagMissing", "TagMismatch", "TagNotCommit", "TagPeelTooDeep", "TagMoved"]
+const maxPeel = 5
+// Peel a tag ref to a commit through annotated tag objects. Never touches compare.
+const peelTag = async (octokit: GitHubOctokit, repo: RepoRef, tag: string) => {
+  const base = { owner: repo.owner, repo: repo.repo }
+  const root = `/repos/${repo.owner}/${repo.repo}`
+  const ref = await request(`GET ${root}/git/ref/tags/${encodeURIComponent(tag)}`, () => octokit.rest.git.getRef({ ...base, ref: `tags/${tag}` }), true)
+  if (!ref) return fail("TagMissing", `Tag ${tag} does not exist; nothing proves the branch is preserved.`)
+  const objectSha = ref.data.object.sha
+  let object = ref.data.object
+  for (let level = 0; object.type === "tag"; level++) {
+    if (level >= maxPeel) return fail("TagPeelTooDeep", `Tag ${tag} nests more than ${maxPeel} annotated tag objects.`)
+    const tagSha = object.sha
+    const annotated = await request(`GET ${root}/git/tags/${tagSha}`, () => octokit.rest.git.getTag({ ...base, tag_sha: tagSha }))
+    object = annotated!.data.object
+  }
+  if (object.type !== "commit" || !/^[a-fA-F0-9]{40}$/.test(object.sha)) return fail("TagNotCommit", `Tag ${tag} peels to a ${object.type}, not a commit.`)
+  return { objectSha, peeledSha: object.sha }
+}
+
+const deleteOne = async (octokit: GitHubOctokit, repo: RepoRef, defaultBranch: string, result: BranchResult, yes: boolean, tag?: string) => {
   const branch = result.branch
   validBranch(branch)
   if (branch === defaultBranch) fail("DefaultBranch", "The default branch cannot be deleted.")
@@ -77,10 +97,18 @@ const deleteOne = async (octokit: GitHubOctokit, repo: RepoRef, defaultBranch: s
   // A missing branch GET with a present ref is not proof that protection is disabled.
   if (!metadata) fail("GitHubRequestFailed", `${branchEndpoint} failed (HTTP 404). Cannot verify protection; verify contents: write permission.`)
   if (initial.data.object.type !== "commit" || !/^[a-fA-F0-9]{40}$/.test(result.sha)) fail("InvalidRef", "Branch ref is not a full commit SHA.")
-  const comparison = await request(`GET ${root}/compare/${encodeURIComponent(defaultBranch)}...${result.sha}`,
-    () => octokit.rest.repos.compareCommits({ ...base, base: defaultBranch, head: result.sha! }))
-  result.compare_status = comparison!.data.status
-  if (result.compare_status !== "behind" && result.compare_status !== "identical") fail("NotMerged", "Branch tip is not reachable from the default branch; only behind or identical is accepted.")
+  if (tag === undefined) {
+    const comparison = await request(`GET ${root}/compare/${encodeURIComponent(defaultBranch)}...${result.sha}`,
+      () => octokit.rest.repos.compareCommits({ ...base, base: defaultBranch, head: result.sha! }))
+    result.compare_status = comparison!.data.status
+    if (result.compare_status !== "behind" && result.compare_status !== "identical") fail("NotMerged", "Branch tip is not reachable from the default branch; only behind or identical is accepted.")
+  } else {
+    // The tag replaces only the merge check: its peeled commit must be exactly the branch tip.
+    const peeled = await peelTag(octokit, repo, tag)
+    result.tag_object_sha = peeled.objectSha
+    result.tag_peeled_sha = peeled.peeledSha
+    if (peeled.peeledSha !== result.sha) fail("TagMismatch", `Tag ${tag} peels to ${peeled.peeledSha}, but branch ${branch} is at ${result.sha}. Nothing was deleted.`)
+  }
   const head = `${repo.owner}:${branch}`
   const openPulls = await request(`GET ${root}/pulls?state=open&head=${encodeURIComponent(head)}`,
     () => octokit.paginate(octokit.rest.pulls.list, { ...base, state: "open", head, per_page: 100 }))
@@ -88,6 +116,13 @@ const deleteOne = async (octokit: GitHubOctokit, repo: RepoRef, defaultBranch: s
   if (!yes) { result.outcome = "dryRun"; return }
   const current = await request(refEndpoint, () => octokit.rest.git.getRef(ref), true)
   if (!current || current.data.object.sha !== result.sha) fail("BranchMoved", "Branch disappeared or moved after preflight; nothing was deleted.")
+  if (tag !== undefined) {
+    const recheck = await peelTag(octokit, repo, tag).catch((error) => {
+      if (error instanceof BranchDeleteError && tagCodes.includes(error.code)) return undefined
+      throw error
+    })
+    if (!recheck || recheck.peeledSha !== result.sha) fail("TagMoved", `Tag ${tag} disappeared or no longer peels to ${result.sha} after preflight; nothing was deleted.`)
+  }
   result.delete_attempted = true
   await request(`DELETE ${root}/git/refs/heads/${encodeURIComponent(branch)}`, () => octokit.rest.git.deleteRef(ref))
   try {
@@ -100,7 +135,7 @@ const deleteOne = async (octokit: GitHubOctokit, repo: RepoRef, defaultBranch: s
   result.outcome = "deleted"
 }
 
-const runBatch = async (octokit: GitHubOctokit, repo: RepoRef, branches: string[], yes: boolean, logPath: string, contents: string | undefined) => {
+const runBatch = async (octokit: GitHubOctokit, repo: RepoRef, branches: string[], yes: boolean, logPath: string, contents: string | undefined, tag?: string) => {
   // Open the audit sink before any DELETE. A broken audit sink stops writes, not just reporting.
   await mkdir(path.dirname(logPath), { recursive: true, mode: 0o700 })
   const directory = await lstat(path.dirname(logPath))
@@ -119,14 +154,14 @@ const runBatch = async (octokit: GitHubOctokit, repo: RepoRef, branches: string[
     } catch (error) { stopped = error instanceof BranchDeleteError ? error : new BranchDeleteError("GitHubRequestFailed", "Could not read repository.") }
     const results: BranchResult[] = []
     for (const branch of branches) {
-      const result: BranchResult = { repo: repo.fullName, branch, sha: null, compare_status: null, outcome: "failed", timestamp: new Date().toISOString(), cli_version: packageInfo.version, delete_attempted: false }
+      const result: BranchResult = { repo: repo.fullName, branch, sha: null, compare_status: null, outcome: "failed", timestamp: new Date().toISOString(), cli_version: packageInfo.version, delete_attempted: false, ...(tag === undefined ? {} : { preserved_by_tag: tag, tag_object_sha: null, tag_peeled_sha: null }) }
       try {
         if (stopped) throw stopped
-        await deleteOne(octokit, repo, defaultBranch, result, yes)
+        await deleteOne(octokit, repo, defaultBranch, result, yes, tag)
       } catch (error) {
         const typed = error instanceof BranchDeleteError ? error : new BranchDeleteError("BranchDeleteFailed", "Branch operation failed. Inspect state before retrying.")
         result.error = { code: typed.code, message: typed.message, ...(typed.resetAt === undefined ? {} : { reset_at: typed.resetAt }) }
-        result.outcome = ["InvalidBranch", "DefaultBranch", "ProtectedBranch", "NotMerged", "BranchMoved", "OpenPullRequest"].includes(typed.code) ? "refused" : "failed"
+        result.outcome = ["InvalidBranch", "DefaultBranch", "ProtectedBranch", "NotMerged", "BranchMoved", "OpenPullRequest", ...tagCodes].includes(typed.code) ? "refused" : "failed"
         if (typed.code === "RateLimited") stopped = typed
       }
       await log.writeFile(`${JSON.stringify(result)}\n`)
@@ -143,10 +178,16 @@ export const deleteBranchCmd = Command.make("delete-branch", {
   repo: Args.text({ name: "repo" }),
   branches: Options.text("branch").pipe(Options.repeated),
   branchesFile: Options.text("branches-file").pipe(Options.optional),
+  preservedByTag: Options.text("preserved-by-tag").pipe(Options.optional),
   log: Options.text("log").pipe(Options.optional),
   dryRun: Options.boolean("dry-run"), yes: Options.boolean("yes"),
-}, ({ repo, branches, branchesFile, log, dryRun, yes }) => Effect.gen(function* () {
+}, ({ repo, branches, branchesFile, preservedByTag, log, dryRun, yes }) => Effect.gen(function* () {
   const fromFile = Option.getOrUndefined(branchesFile)
+  const tag = Option.getOrUndefined(preservedByTag)
+  if (tag !== undefined) {
+    if (fromFile !== undefined || branches.length !== 1) return yield* Effect.fail(new BranchDeleteError("InvalidTagMode", "--preserved-by-tag takes exactly one --branch and no --branches-file."))
+    if (!validRefName(tag)) return yield* Effect.fail(new BranchDeleteError("InvalidTag", "Pass a valid short tag name, not a refs/ prefixed ref."))
+  }
   if (dryRun && yes) return yield* Effect.fail(new BranchDeleteError("InvalidConfirmation", "Use either --dry-run or --yes, not both."))
   if ((branches.length > 0) === (fromFile !== undefined)) return yield* Effect.fail(new BranchDeleteError("InvalidBranches", "Supply --branch names or --branches-file, not both, and at least one branch."))
   const names = fromFile === undefined ? branches : yield* Effect.tryPromise({
@@ -157,7 +198,7 @@ export const deleteBranchCmd = Command.make("delete-branch", {
   const repoRef = yield* Effect.try({ try: () => parseRepo(repo), catch: () => new BranchDeleteError("InvalidRepository", "Use owner/repo.") })
   const { octokit, token } = yield* createRepoOctokit(repoRef)
   const logPath = Option.getOrElse(log, () => path.join(homedir(), ".local/state/shitrat/branch-deletes.jsonl"))
-  const batch = yield* Effect.tryPromise({ try: () => runBatch(octokit, repoRef, names, yes, logPath, token.permissions.contents), catch: (error) => error instanceof BranchDeleteError ? error : new BranchDeleteError("AuditLogFailed", "Audit log could not be opened or appended. Stop and inspect branch state and log permissions before retrying.") })
+  const batch = yield* Effect.tryPromise({ try: () => runBatch(octokit, repoRef, names, yes, logPath, token.permissions.contents, tag), catch: (error) => error instanceof BranchDeleteError ? error : new BranchDeleteError("AuditLogFailed", "Audit log could not be opened or appended. Stop and inspect branch state and log permissions before retrying.") })
   const result = { ...batch, repo: repoRef.fullName, dry_run: !yes, github_write: batch.results.some((item) => item.delete_attempted), actor: "shitratgit[bot]", installation_id: token.installationId, log: logPath }
   const actions = [{ command: "status <repo>", description: "Check repository access; inspect branch results and the audit log before retrying", params: { repo: { value: repoRef.fullName } } }]
   const command = `delete-branch ${repoRef.fullName}`
@@ -169,4 +210,4 @@ export const deleteBranchCmd = Command.make("delete-branch", {
   process.exitCode = 1
   const typed = error instanceof BranchDeleteError ? error : new BranchDeleteError("BranchDeleteFailed", "Authentication or branch deletion failed. Verify repository access and contents: write permission.")
   yield* Console.log(json(failure(`delete-branch ${repo}`, typed.message, typed.code, "Inspect inputs, repository state and contents: write permission before retrying.", [{ command: "status <repo>", description: "Check App repository access", params: { repo: { value: repo } } }])))
-})))).pipe(Command.withDescription("Delete merged, unprotected branches; dry-run by default, writes require --yes"))
+})))).pipe(Command.withDescription("Delete merged (or tag-preserved), unprotected branches; dry-run by default, writes require --yes"))
