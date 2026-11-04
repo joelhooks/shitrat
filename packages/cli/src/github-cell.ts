@@ -1,11 +1,12 @@
 import { createServer } from "node:net"
+import { AsyncLocalStorage } from "node:async_hooks"
 import { constants } from "node:fs"
 import { open, readFile } from "node:fs/promises"
 
 export class GitHubCellError extends Error {
   readonly code = "GITHUB_CELL_ERROR"
-  constructor(readonly reason: "configuration" | "client" | "refused" | "unsupported") {
-    super(`Cell route failed (${reason}). Check SC_URL, SC_AUDIENCE, the sc executable, caller identity/pass and SHITRAT_CELL_CALLER_DOCUMENT_FILE. No automatic direct-key fallback; SHITRAT_GITHUB_CELL_FALLBACK=direct explicitly permits setup fallback.`)
+  constructor(readonly reason: "configuration" | "client" | "refused" | "unsupported", detail?: string) {
+    super(detail ? `Cell route failed (${reason}). ${detail}` : `Cell route failed (${reason}). Check SC_URL, SC_AUDIENCE, the sc executable, caller identity/pass and SHITRAT_CELL_CALLER_DOCUMENT_FILE. No automatic direct-key fallback; SHITRAT_GITHUB_CELL_FALLBACK=direct explicitly permits setup fallback.`)
   }
 }
 
@@ -89,7 +90,12 @@ export const cellPlaceholder = (owner: string): string => {
 export const isCellPlaceholder = (value: string): boolean =>
   /^\{\{secret:shitrat-github\/[a-zA-Z0-9][a-zA-Z0-9-]*\}\}$/.test(value)
 
+const requireBun = (): void => {
+  if (typeof Bun === "undefined") throw new GitHubCellError("configuration", "The cell route needs Bun. Run ShitRat with Bun or explicitly select the direct route.")
+}
+
 export const prepareCell = async (owner: string): Promise<void> => {
+  requireBun()
   cellPlaceholder(owner)
   const config = await clientConfiguration()
   const args = [...config.args, "describe", "shitrat-github"]
@@ -147,13 +153,34 @@ const availablePort = async (): Promise<number> => {
   })
 }
 
-export const withCellForward = async <T>(input: {
-  readonly host: "api.github.com" | "github.com"
-  readonly run: (origin: string) => Promise<T>
-}): Promise<T> => {
+type CellHost = "api.github.com" | "github.com"
+type CellForward = { readonly origin: string; readonly proc: Bun.Subprocess; readonly stop: () => Promise<void> }
+type CachedForward = Promise<CellForward> | GitHubCellError
+const commandForwards = new AsyncLocalStorage<Map<CellHost, CachedForward>>()
+
+// Lifecycle: absent -> starting (shared promise) -> ready or failed -> stopped.
+// Retain failed starts and terminal refusals until command exit: never replay an uncertain operation.
+export const withCellCommand = async <T>(run: () => Promise<T>): Promise<T> => {
+  if (commandForwards.getStore()) return run()
+  const forwards = new Map<CellHost, CachedForward>()
+  return commandForwards.run(forwards, async () => {
+    try {
+      return await run()
+    } finally {
+      await Promise.all([...forwards.values()].map(async (forward) => {
+        if (forward instanceof GitHubCellError) return
+        const ready = await forward.catch(() => undefined)
+        await ready?.stop()
+      }))
+    }
+  })
+}
+
+const startCellForward = async (host: CellHost): Promise<CellForward> => {
+  requireBun()
   const port = await availablePort()
   const config = await clientConfiguration()
-  const args = [...config.args, "forward", "--listen", `127.0.0.1:${port}`, "--upstream-host", input.host]
+  const args = [...config.args, "forward", "--listen", `127.0.0.1:${port}`, "--upstream-host", host]
   let proc
   try {
     proc = Bun.spawn(args, { env: config.env, stdin: "ignore", stdout: "ignore", stderr: "pipe" })
@@ -161,6 +188,15 @@ export const withCellForward = async <T>(input: {
     throw new GitHubCellError("client")
   }
   const reader = proc.stderr.getReader()
+  // Synchronous exit also covers callers that terminate before their finally runs.
+  const kill = () => { proc.kill("SIGKILL") }
+  process.once("exit", kill)
+  const stop = async () => {
+    process.off("exit", kill)
+    kill()
+    await proc.exited
+    await reader.cancel().catch(() => {})
+  }
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     await Promise.race([
@@ -181,17 +217,45 @@ export const withCellForward = async <T>(input: {
     ])
     clearTimeout(timer)
     void (async () => { while (!(await reader.read()).done) {} })().catch(() => {})
-    return await input.run(`http://127.0.0.1:${port}`)
+    return { origin: `http://127.0.0.1:${port}`, proc, stop }
+  } catch (error) {
+    await stop()
+    throw error
   } finally {
     clearTimeout(timer)
-    proc.kill("SIGKILL")
-    await proc.exited
-    await reader.cancel().catch(() => {})
   }
 }
 
+export const withCellForward = <T>(input: {
+  readonly host: CellHost
+  readonly run: (origin: string) => Promise<T>
+}): Promise<T> => withCellCommand(async () => {
+  const forwards = commandForwards.getStore()!
+  let forward = forwards.get(input.host)
+  if (!forward) {
+    forward = startCellForward(input.host)
+    forwards.set(input.host, forward)
+  }
+  if (forward instanceof GitHubCellError) throw forward
+  const ready = await forward
+  // A dead child's port can belong to someone else. Never send credentials or
+  // trust a response there, and never restart an uncertain write mid-command.
+  if (ready.proc.exitCode !== null || ready.proc.killed) {
+    const error = new GitHubCellError("client", "cell forward exited mid-command; rerun")
+    forwards.set(input.host, error)
+    await ready.stop()
+    throw error
+  }
+  return input.run(ready.origin)
+})
+
 export const cellFetch: typeof fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
-  const url = new URL(input instanceof Request ? input.url : input)
+  let url: URL
+  try {
+    url = new URL(input instanceof Request ? input.url : input)
+  } catch {
+    throw new GitHubCellError("unsupported", "The cell route requires an absolute HTTPS api.github.com URL.")
+  }
   if (url.protocol !== "https:" || url.hostname !== "api.github.com" || url.port || url.username || url.password) {
     throw new GitHubCellError("unsupported")
   }
@@ -212,11 +276,15 @@ export const cellFetch: typeof fetch = Object.assign(async (input: string | URL 
       })
       const body = await response.arrayBuffer()
       if (response.status >= 300 && response.status < 400) throw new GitHubCellError("refused")
-      return new Response(response.status === 204 || response.status === 205 || response.status === 304 ? null : body, {
+      const buffered = new Response(response.status === 204 || response.status === 205 || response.status === 304 ? null : body, {
         status: response.status,
         statusText: response.statusText,
         headers: response.headers,
       })
+      // A constructed Response has url="". Octokit pagination parses response.url,
+      // even on a final page. Expose the logical GitHub URL, never the loopback URL.
+      Object.defineProperty(buffered, "url", { value: url.href })
+      return buffered
     },
   })
 }, { preconnect: fetch.preconnect })

@@ -50,6 +50,7 @@ import { cancelRunsCmd } from "./commands/cancel-runs.js"
 import { inboxCmd } from "./commands/inbox.js"
 import { xCmd } from "./commands/x.js"
 import { errorMessage, failure, json, success } from "./response.js"
+import { withCellCommand } from "./github-cell.js"
 
 const root = Command.make("shitrat", {}, () =>
   Effect.gen(function* () {
@@ -682,7 +683,7 @@ if (await handleNativeShitRatCommand(argv)) {
 
 const run = cli(argv).pipe(Effect.provide(BunContext.layer))
 
-Effect.runPromise(run)
+withCellCommand(() => Effect.runPromise(run))
   .then(() => {
     restoreOutput()
     if (tokenOnlyOutput || runnerTokenInvoked) {

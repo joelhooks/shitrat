@@ -10,7 +10,7 @@ const signing = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateK
 const identity = JSON.stringify({ did: "did:web:fixture.example.invalid", signing })
 const fixture = path.join(import.meta.dir, "fixtures/cell-client.ts")
 const readOrEmpty = async (file: string) => readFile(file, "utf8").catch(() => "")
-type Seen = { path: string; authorization: string | null; auth: string | null; body: Buffer }
+type Seen = { path: string; search: string; authorization: string | null; auth: string | null; body: Buffer }
 
 const scenario = async (input: {
   via?: string
@@ -22,6 +22,7 @@ const scenario = async (input: {
   missingIdentity?: boolean
   identityFile?: string
   cli?: boolean
+  cliArgs?: string[]
   forwardFailure?: boolean
   unavailableClient?: boolean
   missingDocument?: boolean
@@ -49,7 +50,7 @@ const scenario = async (input: {
         expect(verify("sha256", Buffer.from(`${header}.${payload}`), { key: createPublicKey({ key: signing, format: "jwk" }), dsaEncoding: "ieee-p1363" }, Buffer.from(signature!, "base64url"))).toBe(true)
         expect(JSON.parse(Buffer.from(payload!, "base64url").toString())).toMatchObject({ aud: "did:web:cell.example.invalid", iss: "did:web:fixture.example.invalid" })
       }
-      seen.push({ path: url.pathname, authorization: request.headers.get("authorization"), auth: request.headers.get("x-sc-auth"), body: Buffer.from(await request.arrayBuffer()) })
+      seen.push({ path: url.pathname, search: url.search, authorization: request.headers.get("authorization"), auth: request.headers.get("x-sc-auth"), body: Buffer.from(await request.arrayBuffer()) })
       if (url.pathname === "/v1/describe") return Response.json({ name: "shitrat-github", kind: "github-app" }, { status: input.refusal ? 403 : 200 })
       if (input.fetchRefusal) return Response.json({ error: { what: "refused", why: "fixture-policy", next: "sc describe shitrat-github" } }, { status: 403 })
       if (input.redirect) return new Response(null, { status: 302, headers: { location: "https://unapproved.example.invalid/leak" } })
@@ -73,11 +74,23 @@ const scenario = async (input: {
         }
         return new Response(bytes.subarray(boundary + 4), { status, headers })
       }
+      const apiPath = url.pathname.replace("/v1/u/api.github.com", "")
+      const page = Number(url.searchParams.get("page") ?? "1")
+      const headers: Record<string, string> = page === 1 ? { link: `<https://api.github.com${apiPath}?per_page=100&page=2>; rel="next"` } : {}
+      if (apiPath.endsWith("/check-runs")) return Response.json({ total_count: 2, check_runs: [{ id: page, name: `check-${page}`, status: "completed", conclusion: "success" }] }, { headers })
+      if (apiPath.endsWith("/status")) return Response.json({ sha: "a".repeat(40), url: `https://api.github.com${apiPath}`, state: "success", total_count: 2, statuses: [{ context: `status-${page}`, state: "success" }] })
+      if (apiPath.endsWith("/actions/runners")) return Response.json({ total_count: 2, runners: [{ id: page, name: `runner-${page}`, os: "linux", status: "offline", busy: false, labels: [] }] }, { headers })
       return Response.json({ full_name: "example/project", cell: true })
     },
   })
   const run = async (args: string[] = []): Promise<Result> => {
-    const proc = Bun.spawn([process.execPath, "--preload", path.join(import.meta.dir, "fixtures/cell-direct-preload.ts"), ...(input.cli ? [path.join(import.meta.dir, "../src/cli.ts"), "status", "example/project"] : [path.join(import.meta.dir, "fixtures/cell-driver.ts"), input.mode ?? "repo"])], {
+    const nodeModule = path.join(home, "github-cell.mjs")
+    if (input.mode === "no-bun") {
+      const build = await Bun.build({ entrypoints: [path.join(import.meta.dir, "../src/github-cell.ts")], target: "node" })
+      expect(build.success).toBe(true)
+      await writeFile(nodeModule, await build.outputs[0]!.text())
+    }
+    const proc = Bun.spawn(input.mode === "no-bun" ? ["node", path.join(import.meta.dir, "fixtures/cell-node-driver.mjs"), nodeModule] : [process.execPath, "--preload", path.join(import.meta.dir, "fixtures/cell-direct-preload.ts"), ...(input.cli ? [path.join(import.meta.dir, "../src/cli.ts"), ...(input.cliArgs ?? ["status", "example/project"])] : [path.join(import.meta.dir, input.mode === "dead-forward" ? "fixtures/cell-dead-forward-driver.ts" : "fixtures/cell-driver.ts"), input.mode ?? "repo"])], {
       env: {
         PATH: process.env.PATH, HOME: home,
         SC_URL: server.url.origin, SC_AUDIENCE: "did:web:cell.example.invalid",
@@ -129,12 +142,116 @@ describe("GitHub cell route", () => {
     expect(result.seen.at(-1)).toMatchObject({ path: "/v1/u/api.github.com/repos/example/project", authorization: "Bearer {{secret:shitrat-github/example}}" })
     expect(result.seen.every((request) => !!request.auth)).toBe(true)
   })
+  for (const mode of ["twice", "parallel", "throw-after-request"]) test(`${mode} reuses one forward and closes it at command exit`, async () => {
+    const result = await scenario({ via: "cell", mode })
+    expect(result.exit).toBe(mode === "throw-after-request" ? 1 : 0)
+    expect(result.direct).toBe("")
+    expect(result.seen.filter((request) => request.path.startsWith("/v1/u/"))).toHaveLength(2)
+    // The contract fixture records each child spawn, not each request.
+    if (!process.env.SHITRAT_TEST_SC_BIN) {
+      const forwards: string[][] = result.argv.trim().split("\n").map((line) => JSON.parse(line)).filter((args) => args.includes("forward"))
+      expect(forwards).toHaveLength(1)
+      const args = forwards[0]!
+      const listen = args[args.indexOf("--listen") + 1]!
+      await expect(fetch(`http://${listen}/`, { signal: AbortSignal.timeout(1000) })).rejects.toThrow()
+    }
+  })
+  test("an exited forward refuses later calls before fetching a replacement listener", async () => {
+    const result = await scenario({ via: "cell", mode: "dead-forward" })
+    expect(result.exit).toBe(0)
+    const output = JSON.parse(result.stdout)
+    expect(output.errors).toHaveLength(2)
+    for (const error of output.errors) {
+      expect(error.reason).toBe("client")
+      expect(error.message).toContain("cell forward exited mid-command; rerun")
+    }
+    expect(output.replacementFetches).toBe(0)
+    expect(output.forwardSpawns).toBe(1)
+    expect(result.seen).toHaveLength(1)
+    expect(result.direct).toBe("")
+  })
+  test("cell setup and forwarding refuse non-Bun runtimes as configuration", async () => {
+    const result = await scenario({ via: "cell", mode: "no-bun" })
+    expect(result.exit).toBe(0)
+    const errors = JSON.parse(result.stdout).errors
+    expect(errors).toHaveLength(2)
+    for (const error of errors) {
+      expect(error.reason).toBe("configuration")
+      expect(error.message).toContain("cell route needs Bun")
+    }
+    expect(result.argv).toBe("")
+    expect(result.seen).toEqual([])
+    expect(result.direct).toBe("")
+  })
+  for (const cliArgs of [
+    ["cancel-runs", "example/project", "--workflow", "preview.yml", "--created-before", "2020-01-01T00:00:00Z", "--yes"],
+    ["delete-branch", "example/project", "--branch", "old-branch", "--yes"],
+  ]) test(`${cliArgs[0]} refuses unavailable cell permission metadata explicitly`, async () => {
+    const result = await scenario({ via: "cell", cli: true, cliArgs })
+    expect(result.exit).toBe(1)
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: { code: "GITHUB_CELL_ERROR" } })
+    expect(result.stdout).toContain("unsupported")
+    expect(result.stdout).toContain("cell mode")
+    expect(result.stdout).not.toContain("Installation token lacks")
+    expect(result.direct).toBe("")
+    expect(result.seen.map((request) => request.path)).toEqual(["/v1/describe"])
+    expect(result.argv).not.toContain("forward")
+  })
   test("status CLI works without direct installation discovery", async () => {
     const result = await scenario({ via: "cell", cli: true })
     expect(result.exit).toBe(0)
     expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, result: { repo: "example/project" } })
     expect(result.direct).toBe("")
     expect(result.seen).toHaveLength(2)
+  })
+  test("buffered API response exposes the original GitHub URL including query", async () => {
+    const result = await scenario({ via: "cell", mode: "response-url" })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ url: "https://api.github.com/repos/example/project?per_page=2&page=3", data: { cell: true } })
+    expect(result.direct).toBe("")
+  })
+  test("malformed and non-GitHub fetch URLs refuse as unsupported before starting a forward", async () => {
+    const result = await scenario({ via: "cell", mode: "invalid-urls" })
+    expect(result.exit).toBe(0)
+    const errors = JSON.parse(result.stdout).errors
+    expect(errors).toHaveLength(4)
+    expect(errors.every((error: { reason: string }) => error.reason === "unsupported")).toBe(true)
+    expect(result.argv).toBe("")
+    expect(result.seen).toEqual([])
+    expect(result.direct).toBe("")
+  })
+  test("checks CLI preserves logical response URLs through check-run and combined-status pagination", async () => {
+    const sha = "a".repeat(40)
+    const result = await scenario({ via: "cell", cli: true, cliArgs: ["checks", "example/project", sha] })
+    expect(result.stdout).toContain('"ok": true')
+    expect(result.exit).toBe(0)
+    const envelope = JSON.parse(result.stdout)
+    expect(envelope).toMatchObject({ ok: true, result: { summary: { verdict: "success", total: 4 } } })
+    expect(envelope.result.check_runs.map((run: { name: string }) => run.name)).toEqual(["check-1", "check-2"])
+    expect(envelope.result.combined_status.statuses.map((status: { context: string }) => status.context)).toEqual(["status-1", "status-2"])
+    const calls = result.seen.filter((request) => request.path.startsWith("/v1/u/"))
+    expect(calls.map((request) => [request.path, new URLSearchParams(request.search).get("page") ?? "1"])).toEqual([
+      [`/v1/u/api.github.com/repos/example/project/commits/${sha}/check-runs`, "1"],
+      [`/v1/u/api.github.com/repos/example/project/commits/${sha}/check-runs`, "2"],
+      [`/v1/u/api.github.com/repos/example/project/commits/${sha}/status`, "1"],
+      [`/v1/u/api.github.com/repos/example/project/commits/${sha}/status`, "2"],
+    ])
+    expect(result.direct).toBe("")
+    expect(calls.every((request) => request.authorization === "Bearer {{secret:shitrat-github/example}}")).toBe(true)
+    if (!process.env.SHITRAT_TEST_SC_BIN) expect(result.argv.trim().split("\n").map((line) => JSON.parse(line)).filter((args: string[]) => args.includes("forward"))).toHaveLength(1)
+  })
+  test("runners CLI follows a GitHub next link through the same cell forward", async () => {
+    const result = await scenario({ via: "cell", cli: true, cliArgs: ["runners", "--repo", "example/project"] })
+    expect(result.stdout).toContain('"ok": true')
+    expect(result.exit).toBe(0)
+    const envelope = JSON.parse(result.stdout)
+    expect(envelope).toMatchObject({ ok: true, result: { count: 2 } })
+    expect(envelope.result.runners.map((runner: { name: string }) => runner.name)).toEqual(["runner-1", "runner-2"])
+    const calls = result.seen.filter((request) => request.path.endsWith("/actions/runners"))
+    expect(calls.map((request) => new URLSearchParams(request.search).get("page") ?? "1")).toEqual(["1", "2"])
+    expect(result.direct).toBe("")
+    expect(result.seen).toHaveLength(3)
+    if (!process.env.SHITRAT_TEST_SC_BIN) expect(result.argv.trim().split("\n").map((line) => JSON.parse(line)).filter((args: string[]) => args.includes("forward"))).toHaveLength(1)
   })
   for (const config of [{ missingIdentity: true }, { identityFile: "/fixture/identity.json" }]) test(`identity source refuses invalid configuration ${JSON.stringify(config)}`, async () => {
     const result = await scenario({ via: "cell", ...config })
