@@ -90,7 +90,7 @@ const scenario = async (input: {
       expect(build.success).toBe(true)
       await writeFile(nodeModule, await build.outputs[0]!.text())
     }
-    const proc = Bun.spawn(input.mode === "no-bun" ? ["node", path.join(import.meta.dir, "fixtures/cell-node-driver.mjs"), nodeModule] : [process.execPath, "--preload", path.join(import.meta.dir, "fixtures/cell-direct-preload.ts"), ...(input.cli ? [path.join(import.meta.dir, "../src/cli.ts"), ...(input.cliArgs ?? ["status", "example/project"])] : [path.join(import.meta.dir, "fixtures/cell-driver.ts"), input.mode ?? "repo"])], {
+    const proc = Bun.spawn(input.mode === "no-bun" ? ["node", path.join(import.meta.dir, "fixtures/cell-node-driver.mjs"), nodeModule] : [process.execPath, "--preload", path.join(import.meta.dir, "fixtures/cell-direct-preload.ts"), ...(input.cli ? [path.join(import.meta.dir, "../src/cli.ts"), ...(input.cliArgs ?? ["status", "example/project"])] : [path.join(import.meta.dir, input.mode === "dead-forward" ? "fixtures/cell-dead-forward-driver.ts" : "fixtures/cell-driver.ts"), input.mode ?? "repo"])], {
       env: {
         PATH: process.env.PATH, HOME: home,
         SC_URL: server.url.origin, SC_AUDIENCE: "did:web:cell.example.invalid",
@@ -155,6 +155,20 @@ describe("GitHub cell route", () => {
       const listen = args[args.indexOf("--listen") + 1]!
       await expect(fetch(`http://${listen}/`, { signal: AbortSignal.timeout(1000) })).rejects.toThrow()
     }
+  })
+  test("an exited forward refuses later calls before fetching a replacement listener", async () => {
+    const result = await scenario({ via: "cell", mode: "dead-forward" })
+    expect(result.exit).toBe(0)
+    const output = JSON.parse(result.stdout)
+    expect(output.errors).toHaveLength(2)
+    for (const error of output.errors) {
+      expect(error.reason).toBe("client")
+      expect(error.message).toContain("cell forward exited mid-command; rerun")
+    }
+    expect(output.replacementFetches).toBe(0)
+    expect(output.forwardSpawns).toBe(1)
+    expect(result.seen).toHaveLength(1)
+    expect(result.direct).toBe("")
   })
   test("cell setup and forwarding refuse non-Bun runtimes as configuration", async () => {
     const result = await scenario({ via: "cell", mode: "no-bun" })

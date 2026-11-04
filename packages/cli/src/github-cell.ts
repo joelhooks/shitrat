@@ -154,19 +154,21 @@ const availablePort = async (): Promise<number> => {
 }
 
 type CellHost = "api.github.com" | "github.com"
-type CellForward = { readonly origin: string; readonly stop: () => Promise<void> }
-const commandForwards = new AsyncLocalStorage<Map<CellHost, Promise<CellForward>>>()
+type CellForward = { readonly origin: string; readonly proc: Bun.Subprocess; readonly stop: () => Promise<void> }
+type CachedForward = Promise<CellForward> | GitHubCellError
+const commandForwards = new AsyncLocalStorage<Map<CellHost, CachedForward>>()
 
 // Lifecycle: absent -> starting (shared promise) -> ready or failed -> stopped.
-// Retain failed starts until command exit: never replay an uncertain operation.
+// Retain failed starts and terminal refusals until command exit: never replay an uncertain operation.
 export const withCellCommand = async <T>(run: () => Promise<T>): Promise<T> => {
   if (commandForwards.getStore()) return run()
-  const forwards = new Map<CellHost, Promise<CellForward>>()
+  const forwards = new Map<CellHost, CachedForward>()
   return commandForwards.run(forwards, async () => {
     try {
       return await run()
     } finally {
       await Promise.all([...forwards.values()].map(async (forward) => {
+        if (forward instanceof GitHubCellError) return
         const ready = await forward.catch(() => undefined)
         await ready?.stop()
       }))
@@ -215,7 +217,7 @@ const startCellForward = async (host: CellHost): Promise<CellForward> => {
     ])
     clearTimeout(timer)
     void (async () => { while (!(await reader.read()).done) {} })().catch(() => {})
-    return { origin: `http://127.0.0.1:${port}`, stop }
+    return { origin: `http://127.0.0.1:${port}`, proc, stop }
   } catch (error) {
     await stop()
     throw error
@@ -234,7 +236,17 @@ export const withCellForward = <T>(input: {
     forward = startCellForward(input.host)
     forwards.set(input.host, forward)
   }
-  return input.run((await forward).origin)
+  if (forward instanceof GitHubCellError) throw forward
+  const ready = await forward
+  // A dead child's port can belong to someone else. Never send credentials or
+  // trust a response there, and never restart an uncertain write mid-command.
+  if (ready.proc.exitCode !== null || ready.proc.killed) {
+    const error = new GitHubCellError("client", "cell forward exited mid-command; rerun")
+    forwards.set(input.host, error)
+    await ready.stop()
+    throw error
+  }
+  return input.run(ready.origin)
 })
 
 export const cellFetch: typeof fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
