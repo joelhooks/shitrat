@@ -61,6 +61,17 @@ When a checkout exists, commit locally as `shitratgit[bot]` so commit hooks run,
 
 Use `commit-file` or `commit-files` only for clone-less edits. Those commands create commits through the GitHub API with web-flow signing; they do not run local hooks.
 
+### GitHub Actions
+
+Use `shitrat checks <owner/repo> <sha>`, `shitrat run-log <owner/repo> <job-id>`, and `shitrat rerun <owner/repo> <run-id>` to inspect CI and rerun jobs.
+
+```bash
+shitrat workflow enable example/project deploy.yml --dry-run
+shitrat workflow disable example/project 42 --dry-run
+```
+
+`workflow enable` and `workflow disable` accept a workflow file name or numeric id and need Actions: write on the GitHub App. Both read the current workflow first. `--dry-run` reports `before.state` and `target_state` without writing. Omit it to apply the change and read back `after.state`. A workflow already in the target state returns `changed: false` without a write. Responses include `next_actions` in the JSON envelope.
+
 ## Public Defaults and Private Overlays
 
 The public repo ships real ShitRat defaults. Users can rename the familiar, change emoji/assets/tone, and add their own semantic components.

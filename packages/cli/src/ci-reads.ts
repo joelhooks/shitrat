@@ -38,6 +38,7 @@ interface Meaning {
   notFound: string
   forbidden: string
   conflict?: string
+  invalidInput?: string
   // GitHub answers an unknown sha with 422 "No commit found for SHA" rather than 404.
   unknownShaIs422?: boolean
 }
@@ -54,6 +55,7 @@ const translate = (error: unknown, meaning: Meaning): CiReadError => {
   }
   if (status === 404 || (status === 422 && meaning.unknownShaIs422)) return new CiReadError("NOT_FOUND", meaning.notFound, status)
   if (status === 403) return new CiReadError("PERMISSION_DENIED", `${meaning.forbidden} (GitHub: ${detail})`, status)
+  if (status === 422 && meaning.invalidInput) return new CiReadError("INVALID_INPUT", meaning.invalidInput, status)
   if (status === 409 && meaning.conflict) return new CiReadError("CONFLICT", `${meaning.conflict} (GitHub: ${detail})`, status)
   return new CiReadError("GITHUB_ERROR", detail, status)
 }
@@ -258,6 +260,48 @@ const runSummary = (run: WorkflowRun) => ({
   head_branch: run.head_branch,
   html_url: run.html_url,
 })
+
+export type WorkflowAction = "enable" | "disable"
+
+type Workflow = Awaited<ReturnType<GitHubOctokit["rest"]["actions"]["getWorkflow"]>>["data"]
+
+const workflowSummary = (workflow: Workflow) => ({
+  id: workflow.id,
+  name: workflow.name,
+  path: workflow.path,
+  state: workflow.state,
+  html_url: workflow.html_url,
+})
+
+export const setWorkflowState = async (
+  octokit: GitHubOctokit,
+  ref: RepoRef,
+  workflow: string,
+  action: WorkflowAction,
+  dryRun: boolean,
+) => {
+  const input = workflow.trim()
+  const numeric = /^\d+$/.test(input)
+  if (!(numeric ? Number.isSafeInteger(Number(input)) && Number(input) > 0 : /^[^/\\\s]+\.ya?ml$/i.test(input))) {
+    throw new CiReadError("INVALID_INPUT", "Pass a workflow file name (deploy.yml) or a positive numeric workflow id.")
+  }
+  const params = { ...ref, workflow_id: numeric ? Number(input) : input }
+  const meaning: Meaning = {
+    notFound: `Workflow ${input} does not exist in ${ref.owner}/${ref.repo}, or the shitratgit app cannot see it.`,
+    forbidden: `GitHub refused to ${action} the workflow: it needs Actions: write on the shitratgit app`,
+    invalidInput: `GitHub rejected workflow ${input}. Pass a workflow file name or numeric id.`,
+  }
+  const before = workflowSummary((await call(() => octokit.rest.actions.getWorkflow(params), meaning)).data)
+  const target = action === "enable" ? "active" : "disabled_manually"
+  const base = { action, workflow: input, target_state: target, before }
+  if (dryRun || before.state === target) return { ...base, changed: false, after: before }
+  const accepted = await call(
+    () => action === "enable" ? octokit.rest.actions.enableWorkflow(params) : octokit.rest.actions.disableWorkflow(params),
+    meaning,
+  )
+  const after = workflowSummary((await call(() => octokit.rest.actions.getWorkflow(params), meaning)).data)
+  return { ...base, changed: true, github_status: accepted.status, after }
+}
 
 export type RerunMode = "all" | "failed"
 
