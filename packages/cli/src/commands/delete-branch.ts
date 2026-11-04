@@ -7,6 +7,7 @@ import path from "node:path"
 import packageInfo from "../../package.json" with { type: "json" }
 import { createRepoOctokit, parseRepo, type GitHubOctokit, type RepoRef } from "../github-app.js"
 import { failure, json, success } from "../response.js"
+import { GitHubCellError, isCellPlaceholder } from "../github-cell.js"
 
 class BranchDeleteError extends Error {
   constructor(readonly code: string, message: string, readonly resetAt?: string) { super(message) }
@@ -197,6 +198,7 @@ export const deleteBranchCmd = Command.make("delete-branch", {
   if (!names.length) return yield* Effect.fail(new BranchDeleteError("InvalidBranches", "The branches file contains no names."))
   const repoRef = yield* Effect.try({ try: () => parseRepo(repo), catch: () => new BranchDeleteError("InvalidRepository", "Use owner/repo.") })
   const { octokit, token } = yield* createRepoOctokit(repoRef)
+  if (isCellPlaceholder(token.token)) return yield* Effect.fail(new GitHubCellError("unsupported", "delete-branch is unsupported in cell mode because permission metadata is unavailable. Explicitly select the direct route to check Contents permissions."))
   const logPath = Option.getOrElse(log, () => path.join(homedir(), ".local/state/shitrat/branch-deletes.jsonl"))
   const batch = yield* Effect.tryPromise({ try: () => runBatch(octokit, repoRef, names, yes, logPath, token.permissions.contents, tag), catch: (error) => error instanceof BranchDeleteError ? error : new BranchDeleteError("AuditLogFailed", "Audit log could not be opened or appended. Stop and inspect branch state and log permissions before retrying.") })
   const result = { ...batch, repo: repoRef.fullName, dry_run: !yes, github_write: batch.results.some((item) => item.delete_attempted), actor: "shitratgit[bot]", installation_id: token.installationId, log: logPath }
@@ -208,6 +210,6 @@ export const deleteBranchCmd = Command.make("delete-branch", {
   } else yield* Console.log(json(success(command, result, actions)))
 }).pipe(Effect.catchAll((error) => Effect.gen(function* () {
   process.exitCode = 1
-  const typed = error instanceof BranchDeleteError ? error : new BranchDeleteError("BranchDeleteFailed", "Authentication or branch deletion failed. Verify repository access and contents: write permission.")
+  const typed = error instanceof BranchDeleteError || error instanceof GitHubCellError ? error : new BranchDeleteError("BranchDeleteFailed", "Authentication or branch deletion failed. Verify repository access and contents: write permission.")
   yield* Console.log(json(failure(`delete-branch ${repo}`, typed.message, typed.code, "Inspect inputs, repository state and contents: write permission before retrying.", [{ command: "status <repo>", description: "Check App repository access", params: { repo: { value: repo } } }])))
 })))).pipe(Command.withDescription("Delete merged (or tag-preserved), unprotected branches; dry-run by default, writes require --yes"))

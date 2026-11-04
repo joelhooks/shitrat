@@ -7,6 +7,7 @@ import path from "node:path"
 import packageInfo from "../../package.json" with { type: "json" }
 import { createRepoOctokit, parseRepo, type GitHubOctokit, type RepoRef } from "../github-app.js"
 import { failure, json, success } from "../response.js"
+import { GitHubCellError, isCellPlaceholder } from "../github-cell.js"
 
 class RunCancelError extends Error {
   constructor(readonly code: string, message: string, readonly resetAt?: string) { super(message) }
@@ -169,6 +170,7 @@ export const cancelRunsCmd = Command.make("cancel-runs", {
   if (!Number.isInteger(max) || max < 1 || max > MAX_CEILING) return yield* invalid("InvalidMax", `--max must be between 1 and ${MAX_CEILING}.`)
   const repoRef = yield* Effect.try({ try: () => parseRepo(repo), catch: () => new RunCancelError("InvalidRepository", "Use owner/repo.") })
   const { octokit, token } = yield* createRepoOctokit(repoRef)
+  if (isCellPlaceholder(token.token)) return yield* Effect.fail(new GitHubCellError("unsupported", "cancel-runs is unsupported in cell mode because permission metadata is unavailable. Explicitly select the direct route to check Actions permissions."))
   const logPath = Option.getOrElse(log, () => path.join(homedir(), ".local/state/shitrat/run-cancels.jsonl"))
   const batch = yield* Effect.tryPromise({
     try: () => runBatch(octokit, repoRef, file, picked as WaitingStatus[], cutoff, max, confirmed, logPath, token.permissions.actions),
@@ -183,6 +185,6 @@ export const cancelRunsCmd = Command.make("cancel-runs", {
   } else yield* Console.log(json(success(command, result, actions)))
 }).pipe(Effect.catchAll((error) => Effect.gen(function* () {
   process.exitCode = 1
-  const typed = error instanceof RunCancelError ? error : new RunCancelError("RunCancelFailed", `Authentication or run cancellation failed. Verify repository access and ${PERMISSION}.`)
+  const typed = error instanceof RunCancelError || error instanceof GitHubCellError ? error : new RunCancelError("RunCancelFailed", `Authentication or run cancellation failed. Verify repository access and ${PERMISSION}.`)
   yield* Console.log(json(failure(`cancel-runs ${repo}`, typed.message, typed.code, `Inspect inputs, run state and ${PERMISSION} before retrying.`, [{ command: "status <repo>", description: "Check App repository access", params: { repo: { value: repo } } }])))
 })))).pipe(Command.withDescription("Cancel stale pending, queued or waiting workflow runs created before a cutoff; dry-run by default, writes require --yes"))

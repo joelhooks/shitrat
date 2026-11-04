@@ -22,6 +22,7 @@ const scenario = async (input: {
   missingIdentity?: boolean
   identityFile?: string
   cli?: boolean
+  cliArgs?: string[]
   forwardFailure?: boolean
   unavailableClient?: boolean
   missingDocument?: boolean
@@ -77,7 +78,13 @@ const scenario = async (input: {
     },
   })
   const run = async (args: string[] = []): Promise<Result> => {
-    const proc = Bun.spawn([process.execPath, "--preload", path.join(import.meta.dir, "fixtures/cell-direct-preload.ts"), ...(input.cli ? [path.join(import.meta.dir, "../src/cli.ts"), "status", "example/project"] : [path.join(import.meta.dir, "fixtures/cell-driver.ts"), input.mode ?? "repo"])], {
+    const nodeModule = path.join(home, "github-cell.mjs")
+    if (input.mode === "no-bun") {
+      const build = await Bun.build({ entrypoints: [path.join(import.meta.dir, "../src/github-cell.ts")], target: "node" })
+      expect(build.success).toBe(true)
+      await writeFile(nodeModule, await build.outputs[0]!.text())
+    }
+    const proc = Bun.spawn(input.mode === "no-bun" ? ["node", path.join(import.meta.dir, "fixtures/cell-node-driver.mjs"), nodeModule] : [process.execPath, "--preload", path.join(import.meta.dir, "fixtures/cell-direct-preload.ts"), ...(input.cli ? [path.join(import.meta.dir, "../src/cli.ts"), ...(input.cliArgs ?? ["status", "example/project"])] : [path.join(import.meta.dir, "fixtures/cell-driver.ts"), input.mode ?? "repo"])], {
       env: {
         PATH: process.env.PATH, HOME: home,
         SC_URL: server.url.origin, SC_AUDIENCE: "did:web:cell.example.invalid",
@@ -128,6 +135,47 @@ describe("GitHub cell route", () => {
     expect(result.stderr.trim()).toBe('{"event":"github-route","path":"cell","reason":"requested"}')
     expect(result.seen.at(-1)).toMatchObject({ path: "/v1/u/api.github.com/repos/example/project", authorization: "Bearer {{secret:shitrat-github/example}}" })
     expect(result.seen.every((request) => !!request.auth)).toBe(true)
+  })
+  for (const mode of ["twice", "parallel", "throw-after-request"]) test(`${mode} reuses one forward and closes it at command exit`, async () => {
+    const result = await scenario({ via: "cell", mode })
+    expect(result.exit).toBe(mode === "throw-after-request" ? 1 : 0)
+    expect(result.direct).toBe("")
+    expect(result.seen.filter((request) => request.path.startsWith("/v1/u/"))).toHaveLength(2)
+    // The contract fixture records each child spawn, not each request.
+    if (!process.env.SHITRAT_TEST_SC_BIN) {
+      const forwards: string[][] = result.argv.trim().split("\n").map((line) => JSON.parse(line)).filter((args) => args.includes("forward"))
+      expect(forwards).toHaveLength(1)
+      const args = forwards[0]!
+      const listen = args[args.indexOf("--listen") + 1]!
+      await expect(fetch(`http://${listen}/`, { signal: AbortSignal.timeout(1000) })).rejects.toThrow()
+    }
+  })
+  test("cell setup and forwarding refuse non-Bun runtimes as configuration", async () => {
+    const result = await scenario({ via: "cell", mode: "no-bun" })
+    expect(result.exit).toBe(0)
+    const errors = JSON.parse(result.stdout).errors
+    expect(errors).toHaveLength(2)
+    for (const error of errors) {
+      expect(error.reason).toBe("configuration")
+      expect(error.message).toContain("cell route needs Bun")
+    }
+    expect(result.argv).toBe("")
+    expect(result.seen).toEqual([])
+    expect(result.direct).toBe("")
+  })
+  for (const cliArgs of [
+    ["cancel-runs", "example/project", "--workflow", "preview.yml", "--created-before", "2020-01-01T00:00:00Z", "--yes"],
+    ["delete-branch", "example/project", "--branch", "old-branch", "--yes"],
+  ]) test(`${cliArgs[0]} refuses unavailable cell permission metadata explicitly`, async () => {
+    const result = await scenario({ via: "cell", cli: true, cliArgs })
+    expect(result.exit).toBe(1)
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: { code: "GITHUB_CELL_ERROR" } })
+    expect(result.stdout).toContain("unsupported")
+    expect(result.stdout).toContain("cell mode")
+    expect(result.stdout).not.toContain("Installation token lacks")
+    expect(result.direct).toBe("")
+    expect(result.seen.map((request) => request.path)).toEqual(["/v1/describe"])
+    expect(result.argv).not.toContain("forward")
   })
   test("status CLI works without direct installation discovery", async () => {
     const result = await scenario({ via: "cell", cli: true })
