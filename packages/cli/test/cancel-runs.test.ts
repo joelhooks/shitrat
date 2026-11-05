@@ -12,7 +12,7 @@ const run = async (scenario = "default", args = [...cutoff, "--yes"]) => {
     const audit = path.join(home, "requests.json")
     const customLog = path.join(home, "custom", "cancels.jsonl")
     const proc = Bun.spawn([process.execPath, "--preload", path.join(import.meta.dir, "fixtures/cancel-runs-preload.ts"), path.join(import.meta.dir, "../src/cli.ts"), "cancel-runs", ...args.map((arg) => arg === "LOG" ? customLog : arg), "example/project"], {
-      env: { PATH: process.env.PATH, HOME: home, SHITRAT_GITHUB_APP_ID: "123", SHITRAT_GITHUB_PRIVATE_KEY: privateKey, SHITRAT_GITHUB_CLIENT_ID: "test-client", SHITRAT_GITHUB_INSTALLATIONS_JSON: '{"example":123}', CANCEL_RUNS_TEST_AUDIT: audit, CANCEL_RUNS_TEST_SCENARIO: scenario },
+      env: { PATH: process.env.PATH, HOME: home, SHITRAT_GITHUB_VIA: "direct", SHITRAT_GITHUB_APP_ID: "123", SHITRAT_GITHUB_PRIVATE_KEY: privateKey, SHITRAT_GITHUB_CLIENT_ID: "test-client", SHITRAT_GITHUB_INSTALLATIONS_JSON: '{"example":123}', CANCEL_RUNS_TEST_AUDIT: audit, CANCEL_RUNS_TEST_SCENARIO: scenario },
       stdout: "pipe", stderr: "pipe",
     })
     const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])

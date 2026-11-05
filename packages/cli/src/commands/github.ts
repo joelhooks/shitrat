@@ -8,7 +8,6 @@ import {
   createRepoOctokit,
   listInstallations,
   parseRepo,
-  resolveInstallationId,
   type GitHubOctokit,
 } from "../github-app.js"
 import {
@@ -756,7 +755,6 @@ export const installationsCmd = Command.make("installations", {}, () =>
 export const statusCmd = Command.make("status", { repo: repoArg }, ({ repo }) =>
   Effect.gen(function* () {
     const repoRef = parseRepo(repo)
-    const installationId = process.env.SHITRAT_GITHUB_VIA === "cell" ? undefined : yield* resolveInstallationId(repoRef.owner)
     const { octokit, token } = yield* createRepoOctokit(repoRef)
     const repository = yield* Effect.tryPromise({
       try: () => octokit.rest.repos.get({ owner: repoRef.owner, repo: repoRef.repo }),
@@ -771,7 +769,7 @@ export const statusCmd = Command.make("status", { repo: repoArg }, ({ repo }) =>
         repo: repository.data.full_name,
         private: repository.data.private,
         default_branch: repository.data.default_branch,
-        installation_id: installationId ?? token.installationId,
+        installation_id: token.installationId,
         token_expires_at: token.expiresAt,
         permissions: token.permissions,
       },

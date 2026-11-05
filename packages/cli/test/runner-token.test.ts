@@ -26,7 +26,7 @@ const run = async (extraEnv: Record<string, string> = {}, args = ["--org", "exam
     const proc = Bun.spawn(argv, {
       env: {
         // Do not inherit real App credentials, secret clients, or logging configuration.
-        PATH: process.env.PATH, HOME: home,
+        PATH: process.env.PATH, HOME: home, SHITRAT_GITHUB_VIA: "direct",
         SHITRAT_GITHUB_APP_ID: "123",
         SHITRAT_GITHUB_PRIVATE_KEY: privateKey,
         SHITRAT_GITHUB_CLIENT_ID: "test-client",

@@ -19,7 +19,7 @@ export const githubViaCell = (): boolean => {
   if (via !== undefined && via !== "direct" && via !== "cell") throw new GitHubCellError("configuration")
   const fallback = process.env.SHITRAT_GITHUB_CELL_FALLBACK
   if (fallback !== undefined && fallback !== "direct") throw new GitHubCellError("configuration")
-  return via === "cell"
+  return via !== "direct"
 }
 
 const clientEnvironment = (): NodeJS.ProcessEnv => {
@@ -112,7 +112,7 @@ export const prepareCell = async (owner: string): Promise<void> => {
 export const selectGitHubPath = async <T>(input: {
   readonly cell: () => Promise<T>
   readonly direct: () => Promise<T>
-}): Promise<T> => {
+}): Promise<T> => withCellCommand(async () => {
   if (!githubViaCell()) {
     logGitHubPath("direct", "selected")
     return input.direct()
@@ -123,18 +123,22 @@ export const selectGitHubPath = async <T>(input: {
   try {
     return await input.cell()
   } catch (error) {
-    if (process.env.SHITRAT_GITHUB_CELL_FALLBACK !== "direct") throw error
-    logGitHubPath("direct", `cell-${error instanceof GitHubCellError ? error.reason : "client"}`)
+    // Fallback is legal only for bounded setup failures before *any* forwarded
+    // operation in this command. Never replay an uncertain write over direct.
+    if (process.env.SHITRAT_GITHUB_CELL_FALLBACK !== "direct" ||
+      commandForwards.getStore()!.phase !== "setup" ||
+      !(error instanceof GitHubCellError) || error.reason === "unsupported") throw error
+    logGitHubPath("direct", `cell-${error.reason}`)
     return input.direct()
   }
-}
+})
 
 export const requireDirectGitHub = (): void => {
   if (!githubViaCell()) {
     logGitHubPath("direct", "selected")
     return
   }
-  if (process.env.SHITRAT_GITHUB_CELL_FALLBACK !== "direct") {
+  if (process.env.SHITRAT_GITHUB_CELL_FALLBACK !== "direct" || commandForwards.getStore()?.phase === "requested") {
     logGitHubPath("cell", "unsupported-app-operation")
     throw new GitHubCellError("unsupported")
   }
@@ -158,7 +162,8 @@ const availablePort = async (): Promise<number> => {
 type CellHost = "api.github.com" | "github.com"
 type CellForward = { readonly origin: string; readonly proc: Bun.Subprocess; readonly stop: () => Promise<void> }
 type CachedForward = Promise<CellForward> | GitHubCellError
-type CellCommand = { readonly nonce: string; readonly forwards: Map<CellHost, CachedForward>; capability?: Promise<void> }
+// Monotonic fallback boundary: setup -> requested. It never resets in a run.
+type CellCommand = { readonly nonce: string; readonly forwards: Map<CellHost, CachedForward>; capability?: Promise<void>; phase: "setup" | "requested" }
 const commandForwards = new AsyncLocalStorage<CellCommand>()
 
 const probeForwardNonceSupport = async (): Promise<void> => {
@@ -221,7 +226,7 @@ export const withCellCommand = async <T>(run: () => Promise<T>): Promise<T> => {
   if (commandForwards.getStore()) return run()
   const forwards = new Map<CellHost, CachedForward>()
   const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url")
-  return commandForwards.run({ nonce, forwards }, async () => {
+  return commandForwards.run({ nonce, forwards, phase: "setup" }, async () => {
     try {
       return await run()
     } finally {
@@ -305,6 +310,9 @@ export const withCellForward = <T>(input: {
     await ready.stop()
     throw error
   }
+  // Both API fetch and smart-HTTP Git cross this boundary. Mark before invoking
+  // the transport, even if it fails before a response can prove what happened.
+  commandForwards.getStore()!.phase = "requested"
   return input.run(ready.origin, nonce)
 })
 
