@@ -55,7 +55,12 @@ const runGitResult = async (
 ): Promise<GitResult> => {
   const env = { ...process.env, ...options.env }
   if (options.cell) {
-    for (const key of ["SC_IDENTITY_JSON", "SC_PASS_FILE", "SHITRAT_GITHUB_PRIVATE_KEY", "SHITRAT_PUSH_TOKEN", "SHITRAT_GITHUB_TOKEN"]) delete env[key]
+    for (const key of ["SC_IDENTITY_JSON", "SC_PASS_FILE", "SHITRAT_GITHUB_PRIVATE_KEY", "SHITRAT_PUSH_TOKEN", "SHITRAT_GITHUB_TOKEN", "SC_FORWARD_NONCE"]) delete env[key]
+    // Custom headers are not covered by Git's credential redaction. Disable
+    // inherited tracing, including file-based trace destinations and trace2.
+    for (const key of Object.keys(env)) {
+      if (key.startsWith("GIT_TRACE") || key === "GIT_CURL_VERBOSE" || key === "GIT_REDACT_COOKIES") delete env[key]
+    }
   }
   const proc = Bun.spawn(["git", ...args], {
     cwd: options.cwd,
@@ -119,6 +124,7 @@ export const buildCellGitInvocation = (input: {
   readonly args: readonly string[]
   readonly placeholder: string
   readonly origin: string
+  readonly nonce: string
 }): AuthenticatedGitInvocation => {
   if (!isCellPlaceholder(input.placeholder) || !/^http:\/\/127\.0\.0\.1:\d+$/.test(input.origin)) {
     throw new GitHubCellError("configuration")
@@ -131,11 +137,20 @@ export const buildCellGitInvocation = (input: {
       "-c", "protocol.http.allow=always",
       "-c", "credential.helper=",
       "-c", "http.followRedirects=false",
-      "-c", "http.extraHeader=",
-      "-c", `http.${input.origin}/.extraHeader=Authorization: {{secret-basic:user=x-access-token,password=${credential}}}`,
       ...input.args.map((arg) => arg.startsWith("https://github.com/") ? `${input.origin}/${arg.slice("https://github.com/".length)}` : arg),
     ],
-    env: { ...AUTHENTICATED_GIT_CONFIG_ENV, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/usr/bin/false", GIT_TRACE: "0", GIT_TRACE_CURL: "0", GIT_CURL_VERBOSE: "0" },
+    env: {
+      ...AUTHENTICATED_GIT_CONFIG_ENV,
+      // Git must authenticate to the forward too, without putting the nonce in argv.
+      GIT_CONFIG_COUNT: "3",
+      GIT_CONFIG_KEY_0: "http.extraHeader",
+      GIT_CONFIG_VALUE_0: "",
+      GIT_CONFIG_KEY_1: `http.${input.origin}/.extraHeader`,
+      GIT_CONFIG_VALUE_1: `Authorization: {{secret-basic:user=x-access-token,password=${credential}}}`,
+      GIT_CONFIG_KEY_2: `http.${input.origin}/.extraHeader`,
+      GIT_CONFIG_VALUE_2: `x-sc-forward-token: ${input.nonce}`,
+      GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/usr/bin/false",
+    },
   }
 }
 
@@ -153,9 +168,9 @@ const runAuthenticatedGit = async (
   if (isCellPlaceholder(installationToken)) {
     return withCellForward({
       host: "github.com",
-      run: async (origin) => {
-        const invocation = buildCellGitInvocation({ args, placeholder: installationToken, origin })
-        const result = await runGitResult(invocation.args, { cwd, env: invocation.env, cell: true })
+      run: async (origin, nonce) => {
+        const invocation = buildCellGitInvocation({ args, placeholder: installationToken, origin, nonce })
+        const result = await runGitResult(invocation.args, { cwd, env: invocation.env, cell: true, sensitiveValues: [nonce] })
         if (result.exitCode !== 0) throw new GitHubCellError("refused")
         return result
       },
