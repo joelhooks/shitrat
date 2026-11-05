@@ -11,6 +11,9 @@ const identity = JSON.stringify({ did: "did:web:fixture.example.invalid", signin
 const fixture = path.join(import.meta.dir, "fixtures/cell-client.ts")
 const readOrEmpty = async (file: string) => readFile(file, "utf8").catch(() => "")
 type Seen = { path: string; search: string; authorization: string | null; auth: string | null; body: Buffer }
+type NonceRecord = { command: string; nonce: string | null }
+type ForwardRequest = { token: string; nonce: string }
+type GitChild = { args: string[]; nonceEnv: string | null; traceKeys: string[] }
 
 const scenario = async (input: {
   via?: string
@@ -25,6 +28,7 @@ const scenario = async (input: {
   cliArgs?: string[]
   forwardFailure?: boolean
   unavailableClient?: boolean
+  gitTracing?: boolean
   missingDocument?: boolean
   documentMismatch?: "did" | "key"
   git?: (home: string, run: (args: string[]) => Promise<Result>) => Promise<Result>
@@ -43,6 +47,7 @@ const scenario = async (input: {
     hostname: "127.0.0.1", port: 0,
     async fetch(request) {
       const url = new URL(request.url)
+      expect(request.headers.has("x-sc-forward-token")).toBe(false)
       if (process.env.SHITRAT_TEST_SC_BIN && !input.forwardFailure) {
         const token = request.headers.get("x-sc-auth") ?? ""
         const [header, payload, signature] = token.split(".")
@@ -97,20 +102,44 @@ const scenario = async (input: {
         ...(!input.missingIdentity ? { SC_IDENTITY_JSON: identity } : {}),
         ...(input.identityFile ? { SHITRAT_CELL_IDENTITY_FILE: input.identityFile } : {}),
         ...(!input.missingDocument ? { SHITRAT_CELL_CALLER_DOCUMENT_FILE: documentFile } : {}),
-        SHITRAT_SC_BIN: input.unavailableClient ? path.join(home, "missing-sc") : input.forwardFailure ? fixture : process.env.SHITRAT_TEST_SC_BIN ?? fixture,
+        SHITRAT_SC_BIN: input.unavailableClient ? path.join(home, "missing-sc") : input.forwardFailure || input.mode?.startsWith("nonce-") ? fixture : process.env.SHITRAT_TEST_SC_BIN ?? fixture,
+        SC_FORWARD_NONCE: "inherited-nonce-must-be-replaced-not-forwarded",
+        CELL_TEST_NONCES: path.join(home, "nonces"), CELL_TEST_FORWARD_REQUESTS: path.join(home, "forward-requests"),
+        ...(input.mode === "nonce-refusal" ? { CELL_TEST_NONCE_REFUSAL: "1" } : {}),
+        ...(input.mode === "nonce-echo" ? { CELL_TEST_ECHO_NONCE: "1" } : {}),
         ...(input.forwardFailure ? { CELL_TEST_FORWARD_FAIL: "1" } : {}),
         ...(input.via ? { SHITRAT_GITHUB_VIA: input.via } : {}),
         ...(input.fallback ? { SHITRAT_GITHUB_CELL_FALLBACK: input.fallback } : {}),
         SHITRAT_GITHUB_APP_ID: "123", SHITRAT_GITHUB_PRIVATE_KEY: privateKey, SHITRAT_GITHUB_CLIENT_ID: "fixture-client", SHITRAT_GITHUB_INSTALLATIONS_JSON: '{"example":123}',
         CELL_TEST_DIRECT: path.join(home, "direct"), CELL_TEST_ARGV: path.join(home, "argv"),
         CELL_TEST_GIT_ARGS: JSON.stringify(args), CELL_TEST_GIT_CWD: path.join(home, "local"),
+        CELL_TEST_GIT_CHILDREN: path.join(home, "git-children"),
+        ...(input.gitTracing ? { GIT_TRACE: "1", GIT_TRACE_CURL: "1", GIT_TRACE_PACKET: "1", GIT_CURL_VERBOSE: "1", GIT_REDACT_COOKIES: "fixture", GIT_TRACE2_EVENT: path.join(home, "git-trace") } : {}),
       },
       stdout: "pipe", stderr: "pipe",
     })
     const [stdout, stderr, exit] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
     const argv = await readOrEmpty(path.join(home, "argv"))
     for (const secret of [privateKey, signing.d!, "FAKE-INSTALLATION-TOKEN", identity]) expect(stdout + stderr + argv).not.toContain(secret)
-    return { stdout, stderr, exit, argv, direct: await readOrEmpty(path.join(home, "direct")), seen }
+    const nonces: NonceRecord[] = (await readOrEmpty(path.join(home, "nonces"))).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+    const forwardRequests: ForwardRequest[] = (await readOrEmpty(path.join(home, "forward-requests"))).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+    const gitChildren: GitChild[] = (await readOrEmpty(path.join(home, "git-children"))).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+    const gitTrace = await readOrEmpty(path.join(home, "git-trace"))
+    for (const child of gitChildren) {
+      expect(child.nonceEnv).toBeNull()
+      expect(child.traceKeys).toEqual([])
+    }
+    for (const { command, nonce } of nonces) {
+      if (command !== "forward") expect(nonce).toBeNull()
+      else {
+        expect(nonce).toMatch(/^[A-Za-z0-9_-]{43}$/)
+        expect(Buffer.from(nonce!, "base64url")).toHaveLength(32)
+        expect(nonce).not.toBe("inherited-nonce-must-be-replaced-not-forwarded")
+        expect(stdout + stderr + argv + JSON.stringify(gitChildren) + gitTrace).not.toContain(nonce!)
+      }
+    }
+    for (const request of forwardRequests) expect(request.token).toBe(request.nonce)
+    return { stdout, stderr, exit, argv, nonces, forwardRequests, gitChildren, gitTrace, direct: await readOrEmpty(path.join(home, "direct")), seen }
   }
   try {
     if (input.git) return await input.git(home, run)
@@ -120,9 +149,37 @@ const scenario = async (input: {
     await rm(home, { recursive: true, force: true })
   }
 }
-type Result = { stdout: string; stderr: string; exit: number; argv: string; direct: string; seen: Seen[] }
+type Result = { stdout: string; stderr: string; exit: number; argv: string; nonces: NonceRecord[]; forwardRequests: ForwardRequest[]; gitChildren: GitChild[]; gitTrace: string; direct: string; seen: Seen[] }
 
 describe("GitHub cell route", () => {
+  test("separate command runs generate different 32-byte nonces", async () => {
+    const first = await scenario({ via: "cell", mode: "nonce-echo" })
+    const second = await scenario({ via: "cell", mode: "nonce-echo" })
+    expect(first.exit).toBe(0)
+    expect(second.exit).toBe(0)
+    expect(first.nonces).toHaveLength(1)
+    expect(second.nonces).toHaveLength(1)
+    expect(first.nonces[0]!.nonce).not.toBe(second.nonces[0]!.nonce)
+    expect(first.forwardRequests).toHaveLength(1)
+    expect(second.forwardRequests).toHaveLength(1)
+  })
+  test("forward nonce refusal is a terminal client error without retry or fallback", async () => {
+    const result = await scenario({ via: "cell", fallback: "direct", mode: "nonce-refusal" })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout).errors).toEqual(Array(2).fill({ reason: "client", message: "Cell route failed (client). cell forward rejected the run nonce; rerun" }))
+    expect(result.forwardRequests).toHaveLength(1)
+    expect(result.nonces).toHaveLength(1)
+    expect(result.seen).toEqual([])
+    expect(result.direct).toBe("")
+  })
+  test("echoed nonce headers and response bodies are redacted before callers see them", async () => {
+    const result = await scenario({ via: "cell", mode: "nonce-echo" })
+    expect(result.exit).toBe(0)
+    const output = JSON.parse(result.stdout)
+    expect(output.headers).not.toHaveProperty("x-sc-forward-token")
+    expect(output.headers["x-echo"]).toBe("[REDACTED]")
+    expect(JSON.parse(output.body).headers["x-sc-forward-token"]).toBe("[REDACTED]")
+  })
   test("no opt-in uses direct auth, logs direct and never starts sc", async () => {
     const result = await scenario({})
     expect(result.exit).toBe(0)
@@ -149,6 +206,8 @@ describe("GitHub cell route", () => {
     expect(result.seen.filter((request) => request.path.startsWith("/v1/u/"))).toHaveLength(2)
     // The contract fixture records each child spawn, not each request.
     if (!process.env.SHITRAT_TEST_SC_BIN) {
+      expect(result.forwardRequests).toHaveLength(2)
+      expect(new Set(result.forwardRequests.map((request) => request.token)).size).toBe(1)
       const forwards: string[][] = result.argv.trim().split("\n").map((line) => JSON.parse(line)).filter((args) => args.includes("forward"))
       expect(forwards).toHaveLength(1)
       const args = forwards[0]!
@@ -322,15 +381,17 @@ describe("GitHub cell route", () => {
     expect(result.stderr).toContain('"reason":"unsupported-app-operation"')
   })
   test("git invocation has only a Basic placeholder and disables redirects/helpers", () => {
-    const invocation = buildCellGitInvocation({ args: ["push", "https://github.com/example/project.git", "HEAD:refs/heads/main"], placeholder: "{{secret:shitrat-github/example}}", origin: "http://127.0.0.1:12345" })
+    const invocation = buildCellGitInvocation({ args: ["push", "https://github.com/example/project.git", "HEAD:refs/heads/main"], placeholder: "{{secret:shitrat-github/example}}", origin: "http://127.0.0.1:12345", nonce: "fixture-run-nonce" })
     expect(invocation.args).toContain("http.followRedirects=false")
     expect(invocation.args).toContain("credential.helper=")
     expect(invocation.args).toContain("http://127.0.0.1:12345/example/project.git")
-    expect(invocation.args.join(" ")).toContain("{{secret-basic:user=x-access-token,password=shitrat-github/example}}")
+    expect(invocation.env.GIT_CONFIG_VALUE_1).toContain("{{secret-basic:user=x-access-token,password=shitrat-github/example}}")
+    expect(invocation.env.GIT_CONFIG_VALUE_2).toBe("x-sc-forward-token: fixture-run-nonce")
+    expect(invocation.args.join(" ")).not.toContain("fixture-run-nonce")
     expect(invocation.env).not.toHaveProperty("SHITRAT_PUSH_TOKEN")
   })
-  test("real git smart HTTP pushes binary packs and fetches through the fake cell", async () => {
-    await scenario({ via: "cell", mode: "git", git: async (home, run) => {
+  for (const gitTracing of [false, true]) test(`real git smart HTTP pushes binary packs and fetches through the fake cell (parent tracing=${gitTracing})`, async () => {
+    await scenario({ via: "cell", mode: "git", gitTracing, git: async (home, run) => {
       const local = path.join(home, "local")
       await mkdir(path.join(home, "example"))
       const git = async (args: string[], cwd = home) => {
@@ -346,9 +407,17 @@ describe("GitHub cell route", () => {
       const sha = await git(["rev-parse", "HEAD"], local)
       const pushed = await run(["push", "https://github.com/example/project.git", "HEAD:refs/heads/main"])
       expect(pushed.exit).toBe(0)
+      if (!process.env.SHITRAT_TEST_SC_BIN) {
+        expect(pushed.nonces).toHaveLength(2)
+        expect(new Set(pushed.nonces.map((record) => record.nonce)).size).toBe(1)
+        expect(new Set(pushed.forwardRequests.map((request) => request.token)).size).toBe(1)
+      }
       expect(await git(["rev-parse", "refs/heads/main"], path.join(home, "example/project.git"))).toBe(sha)
       const fetched = await run(["fetch", "https://github.com/example/project.git", "refs/heads/main:refs/remotes/cell/main"])
       expect(fetched.exit).toBe(0)
+      expect(fetched.gitChildren).toHaveLength(2)
+      expect(fetched.gitTrace).toBe("")
+      if (!process.env.SHITRAT_TEST_SC_BIN) expect(new Set(fetched.nonces.map((record) => record.nonce)).size).toBe(2)
       expect(await git(["rev-parse", "refs/remotes/cell/main"], local)).toBe(sha)
       expect(fetched.seen.some((request) => request.body.includes(Buffer.from("PACK")))).toBe(true)
       expect(fetched.seen.filter((request) => request.path.startsWith("/v1/u/github.com")).every((request) => request.authorization === "{{secret-basic:user=x-access-token,password=shitrat-github/example}}")).toBe(true)

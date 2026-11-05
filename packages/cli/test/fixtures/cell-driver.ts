@@ -6,7 +6,24 @@ import { cellFetch, GitHubCellError, withCellCommand } from "../../src/github-ce
 
 try {
   await withCellCommand(async () => {
-    if (process.argv[2] === "invalid-urls") {
+    if (process.argv[2] === "nonce-refusal" || process.argv[2] === "nonce-echo") {
+      const request = () => cellFetch("https://api.github.com/repos/example/project", {
+        headers: { authorization: "Bearer {{secret:shitrat-github/example}}", "x-sc-forward-token": "caller-must-not-control-the-nonce" },
+      })
+      if (process.argv[2] === "nonce-echo") {
+        const response = await request()
+        process.stdout.write(JSON.stringify({ headers: Object.fromEntries(response.headers), body: await response.text() }))
+      } else {
+        const errors = []
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try { await request() } catch (error) {
+            if (!(error instanceof GitHubCellError)) throw error
+            errors.push({ reason: error.reason, message: error.message })
+          }
+        }
+        process.stdout.write(JSON.stringify({ errors }))
+      }
+    } else if (process.argv[2] === "invalid-urls") {
       const errors = []
       for (const input of ["", "/relative", "https://unapproved.example.invalid/", "http://api.github.com/repos/example/project"]) {
         try { await cellFetch(input) } catch (error) {
@@ -16,6 +33,9 @@ try {
       }
       process.stdout.write(JSON.stringify({ errors }))
     } else if (process.argv[2] === "git") {
+      await cellFetch("https://api.github.com/repos/example/project", {
+        headers: { authorization: "Bearer {{secret:shitrat-github/example}}" },
+      })
       const result = await runCellGit({
         args: JSON.parse(process.env.CELL_TEST_GIT_ARGS!),
         cwd: process.env.CELL_TEST_GIT_CWD!,

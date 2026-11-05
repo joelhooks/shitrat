@@ -24,7 +24,7 @@ export const githubViaCell = (): boolean => {
 
 const clientEnvironment = (): NodeJS.ProcessEnv => {
   const env = { ...process.env }
-  for (const key of ["SHITRAT_GITHUB_PRIVATE_KEY", "SHITRAT_PUSH_TOKEN", "SHITRAT_GITHUB_TOKEN"]) delete env[key]
+  for (const key of ["SHITRAT_GITHUB_PRIVATE_KEY", "SHITRAT_PUSH_TOKEN", "SHITRAT_GITHUB_TOKEN", "SC_FORWARD_NONCE"]) delete env[key]
   return env
 }
 
@@ -156,14 +156,16 @@ const availablePort = async (): Promise<number> => {
 type CellHost = "api.github.com" | "github.com"
 type CellForward = { readonly origin: string; readonly proc: Bun.Subprocess; readonly stop: () => Promise<void> }
 type CachedForward = Promise<CellForward> | GitHubCellError
-const commandForwards = new AsyncLocalStorage<Map<CellHost, CachedForward>>()
+type CellCommand = { readonly nonce: string; readonly forwards: Map<CellHost, CachedForward> }
+const commandForwards = new AsyncLocalStorage<CellCommand>()
 
 // Lifecycle: absent -> starting (shared promise) -> ready or failed -> stopped.
 // Retain failed starts and terminal refusals until command exit: never replay an uncertain operation.
 export const withCellCommand = async <T>(run: () => Promise<T>): Promise<T> => {
   if (commandForwards.getStore()) return run()
   const forwards = new Map<CellHost, CachedForward>()
-  return commandForwards.run(forwards, async () => {
+  const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url")
+  return commandForwards.run({ nonce, forwards }, async () => {
     try {
       return await run()
     } finally {
@@ -176,14 +178,14 @@ export const withCellCommand = async <T>(run: () => Promise<T>): Promise<T> => {
   })
 }
 
-const startCellForward = async (host: CellHost): Promise<CellForward> => {
+const startCellForward = async (host: CellHost, nonce: string): Promise<CellForward> => {
   requireBun()
   const port = await availablePort()
   const config = await clientConfiguration()
   const args = [...config.args, "forward", "--listen", `127.0.0.1:${port}`, "--upstream-host", host]
   let proc
   try {
-    proc = Bun.spawn(args, { env: config.env, stdin: "ignore", stdout: "ignore", stderr: "pipe" })
+    proc = Bun.spawn(args, { env: { ...config.env, SC_FORWARD_NONCE: nonce }, stdin: "ignore", stdout: "ignore", stderr: "pipe" })
   } catch {
     throw new GitHubCellError("client")
   }
@@ -228,12 +230,12 @@ const startCellForward = async (host: CellHost): Promise<CellForward> => {
 
 export const withCellForward = <T>(input: {
   readonly host: CellHost
-  readonly run: (origin: string) => Promise<T>
+  readonly run: (origin: string, nonce: string) => Promise<T>
 }): Promise<T> => withCellCommand(async () => {
-  const forwards = commandForwards.getStore()!
+  const { forwards, nonce } = commandForwards.getStore()!
   let forward = forwards.get(input.host)
   if (!forward) {
-    forward = startCellForward(input.host)
+    forward = startCellForward(input.host, nonce)
     forwards.set(input.host, forward)
   }
   if (forward instanceof GitHubCellError) throw forward
@@ -246,7 +248,7 @@ export const withCellForward = <T>(input: {
     await ready.stop()
     throw error
   }
-  return input.run(ready.origin)
+  return input.run(ready.origin, nonce)
 })
 
 export const cellFetch: typeof fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
@@ -266,20 +268,42 @@ export const cellFetch: typeof fetch = Object.assign(async (input: string | URL 
   headers.set("authorization", `Bearer ${placeholder}`)
   return withCellForward({
     host: "api.github.com",
-    run: async (origin) => {
+    run: async (origin, nonce) => {
+      headers.set("x-sc-forward-token", nonce)
       const response = await fetch(`${origin}${url.pathname}${url.search}`, {
         ...(input instanceof Request ? { method: input.method, headers: input.headers, body: input.body } : {}),
         ...init,
         headers,
         redirect: "manual",
         signal: init?.signal ?? AbortSignal.timeout(60_000),
-      })
-      const body = await response.arrayBuffer()
+      }).catch(() => { throw new GitHubCellError("client") })
+      const body = await response.arrayBuffer().catch(() => { throw new GitHubCellError("client") })
+      if (response.status === 403) {
+        let refusal: unknown
+        try { refusal = JSON.parse(new TextDecoder().decode(body)) } catch { /* Not a forward refusal. */ }
+        if (typeof refusal === "object" && refusal !== null && "what" in refusal && refusal.what === "forward nonce refused") {
+          const error = new GitHubCellError("client", "cell forward rejected the run nonce; rerun")
+          const forwards = commandForwards.getStore()!.forwards
+          const forward = forwards.get("api.github.com")
+          forwards.set("api.github.com", error)
+          if (forward && !(forward instanceof GitHubCellError)) await (await forward).stop()
+          throw error
+        }
+      }
       if (response.status >= 300 && response.status < 400) throw new GitHubCellError("refused")
-      const buffered = new Response(response.status === 204 || response.status === 205 || response.status === 304 ? null : body, {
+      // Do not expose an echoed transport token to Octokit's responses/errors.
+      // latin1 preserves arbitrary bytes while replacing the ASCII nonce.
+      const bytes = Buffer.from(body)
+      const safeBody = bytes.includes(nonce) ? Buffer.from(bytes.toString("latin1").replaceAll(nonce, "[REDACTED]"), "latin1") : body
+      const buffered = new Response(response.status === 204 || response.status === 205 || response.status === 304 ? null : safeBody, {
         status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
+        statusText: response.statusText.replaceAll(nonce, "[REDACTED]"),
+        headers: (() => {
+          const safe = new Headers(response.headers)
+          safe.delete("x-sc-forward-token")
+          for (const [name, value] of safe) safe.set(name, value.replaceAll(nonce, "[REDACTED]"))
+          return safe
+        })(),
       })
       // A constructed Response has url="". Octokit pagination parses response.url,
       // even on a final page. Expose the logical GitHub URL, never the loopback URL.
