@@ -116,6 +116,10 @@ bun run src/cli.ts runner-groups --org example --name isolated
 bun run src/cli.ts runners --org example --group isolated
 # Read repository-level runners (exactly one of --org or --repo is required).
 bun run src/cli.ts runners --repo example/project
+# Read queued and in-progress jobs in repositories accessible to the org installation.
+bun run src/cli.ts runner-jobs --org example
+# Optionally restrict repositories, job statuses and workflow runs per repo per status.
+bun run src/cli.ts runner-jobs --org example --repo example/project --status queued --max-runs 50
 # Preview removal of an offline, idle repository runner. This still reads GitHub.
 bun run src/cli.ts runner-remove --repo example/project --id 10 --dry-run
 # Remove only after authorizing the deletion.
@@ -190,6 +194,14 @@ The stored tokens change only after every check passes: callback state matches, 
 `--all-workflows` disables the workflow restriction and verifies that GitHub saved `false`. It cannot be combined with `--workflow`. Without either flag, workflow fields are omitted from requests and existing workflow restrictions stay untouched. Dry-run includes the intended workflow policy and performs no writes.
 
 A 403, 422 or read-only workflow policy fails with the endpoint, status and `workflow restriction not available for this group or plan`. There is no retry or repository-only fallback. Updates still use separate policy and repository-access requests, so failures can leave a partial change. Inspect with `runner-groups` before retrying. The read command paginates groups and selected repositories; a missing named group fails.
+
+### Actions runner jobs
+
+`runner-jobs --org <org> [--repo <owner/name>]... [--status queued|in_progress]... [--max-runs <n>]` is read-only and uses the same App authentication and default cell route as `runners`. Without `--repo`, it paginates the installation's accessible repositories and selects those owned by the organization. Repeat `--repo` to skip discovery; every repository must belong to `--org`.
+
+Both statuses are queried by default. The command reads up to 50 workflow runs per repository per status, then paginates each run's latest jobs. `--max-runs` must be a positive safe integer. It filters individual jobs to the requested statuses, omitting completed siblings. A run observed in both states is read once. Four independent repository reads run concurrently; reads within each repository are serial.
+
+The JSON envelope's `result` contains `org`, `count`, `jobs` and `errors`. Each job contains `repo`, `runId`, `jobId`, `name`, `status`, `labels`, `runnerName`, `runnerGroupName`, `createdAt` and `startedAt`. Unassigned runner fields and missing timestamps are `null`. A repository failure, including missing Actions read access, adds a sanitized `{repo, endpoint, status, message}` entry to `errors` without failing other repositories. Earlier jobs from a partially read repository remain in `jobs`; always inspect `errors` before treating a result as complete. Authentication and repository discovery failures fail the command. No tokens, raw request errors, reruns, cancellations or permission changes are included.
 
 ### Repository runners
 

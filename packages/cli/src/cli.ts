@@ -45,6 +45,7 @@ import {
   releaseCmd,
 } from "./commands/github.js"
 import { runnerGroupCmd, runnerGroupsCmd, runnerRemoveCmd, runnersCmd, runnerTokenCmd, runnerTokenInvoked } from "./commands/runners.js"
+import { runnerJobsCmd } from "./commands/runner-jobs.js"
 import { deleteBranchCmd } from "./commands/delete-branch.js"
 import { cancelRunsCmd } from "./commands/cancel-runs.js"
 import { inboxCmd } from "./commands/inbox.js"
@@ -101,6 +102,7 @@ const root = Command.make("shitrat", {}, () =>
               runner_groups: "shitrat runner-groups --org <org> [--name <name>]",
               runners: "shitrat runners --org <org> [--group <name>] | --repo <owner/repo>",
               runner_remove: "shitrat runner-remove --repo <owner/repo> --id <n> [--dry-run]",
+              runner_jobs: "shitrat runner-jobs --org <org> [--repo <owner/repo>]... [--status queued|in_progress]... [--max-runs <n>]",
               install:
                 "shitrat install pi|claude|codex-desktop --dry-run",
               update:
@@ -325,6 +327,7 @@ const root = Command.make("shitrat", {}, () =>
     runnerGroupsCmd,
     runnersCmd,
     runnerRemoveCmd,
+    runnerJobsCmd,
     editPrCmd,
     commitFileCmd,
     commitFilesCmd,

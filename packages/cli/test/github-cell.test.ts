@@ -90,6 +90,13 @@ const scenario = async (input: {
       if (apiPath.endsWith("/check-runs")) return Response.json({ total_count: 2, check_runs: [{ id: page, name: `check-${page}`, status: "completed", conclusion: "success" }] }, { headers })
       if (apiPath.endsWith("/status")) return Response.json({ sha: "a".repeat(40), url: `https://api.github.com${apiPath}`, state: "success", total_count: 2, statuses: [{ context: `status-${page}`, state: "success" }] })
       if (apiPath.endsWith("/actions/runners")) return Response.json({ total_count: 2, runners: [{ id: page, name: `runner-${page}`, os: "linux", status: "offline", busy: false, labels: [] }] }, { headers })
+      if (apiPath === "/installation/repositories") return Response.json({ total_count: 2, repositories: [{ full_name: `example/project-${page}`, owner: { login: "example" } }] }, { headers })
+      if (apiPath.endsWith("/actions/runs")) {
+        const status = url.searchParams.get("status")
+        const next = page === 1 ? { link: `<https://api.github.com${apiPath}?status=${status}&per_page=50&page=2>; rel="next"` } : {}
+        return Response.json({ total_count: 2, workflow_runs: [{ id: (status === "queued" ? 0 : 10) + page }] }, { headers: next })
+      }
+      if (apiPath.endsWith("/jobs")) return Response.json({ total_count: 2, jobs: [{ id: page, name: "build", status: "queued", labels: ["self-hosted", "linux", "pool-a"], runner_name: "runner-1", runner_group_name: "pool-a", created_at: "2026-01-01T00:00:00Z", started_at: null }] }, { headers })
       return Response.json({ full_name: "example/project", cell: true })
     },
   })
@@ -385,6 +392,29 @@ describe("GitHub cell route", () => {
     expect(result.direct).toBe("")
     expect(result.seen).toHaveLength(3)
     if (!process.env.SHITRAT_TEST_SC_BIN) expect(result.argv.trim().split("\n").map((line) => JSON.parse(line)).filter((args: string[]) => args.includes("forward") && !args.includes("--capabilities"))).toHaveLength(1)
+  })
+  test("runner-jobs CLI defaults to the cell, paginates and keeps one shared forward", async () => {
+    const result = await scenario({ cli: true, cliArgs: ["runner-jobs", "--org", "example"] })
+    expect(result.exit).toBe(0)
+    const envelope = JSON.parse(result.stdout)
+    expect(envelope).toMatchObject({ ok: true, command: "shitrat runner-jobs", next_actions: [], result: { org: "example", count: 16, errors: [] } })
+    expect(envelope.result.jobs[0]).toEqual({ repo: "example/project-1", runId: 1, jobId: 1, name: "build", status: "queued", labels: ["self-hosted", "linux", "pool-a"], runnerName: "runner-1", runnerGroupName: "pool-a", createdAt: "2026-01-01T00:00:00Z", startedAt: null })
+    const calls = result.seen.filter((request) => request.path.startsWith("/v1/u/"))
+    expect(calls).toHaveLength(26)
+    expect(calls.every((request) => request.method === "GET" && request.authorization === "Bearer {{secret:shitrat-github/example}}")).toBe(true)
+    expect(result.direct).toBe("")
+    expect(result.nonces).toHaveLength(1)
+  })
+  test("runner-jobs CLI accepts repeated repo and status flags and a run cap", async () => {
+    const result = await scenario({ cli: true, cliArgs: ["runner-jobs", "--org", "example", "--repo", "example/one", "--repo", "example/two", "--status", "queued", "--status", "in_progress", "--max-runs", "1"] })
+    expect(result.exit).toBe(0)
+    const envelope = JSON.parse(result.stdout)
+    expect(envelope.result.count).toBe(8)
+    expect(envelope.result.errors).toEqual([])
+    expect([...new Set(envelope.result.jobs.map((job: { repo: string }) => job.repo))]).toEqual(["example/one", "example/two"])
+    expect(result.seen.some((request) => request.path.endsWith("/installation/repositories"))).toBe(false)
+    expect(result.seen.filter((request) => request.path.endsWith("/actions/runs"))).toHaveLength(4)
+    expect(result.direct).toBe("")
   })
   for (const config of [{ missingIdentity: true }, { identityFile: "/fixture/identity.json" }]) test(`identity source refuses invalid configuration ${JSON.stringify(config)}`, async () => {
     const result = await scenario({ via: "cell", ...config })
