@@ -195,6 +195,8 @@ The stored tokens change only after every check passes: callback state matches, 
 
 A 403, 422 or read-only workflow policy fails with the endpoint, status and `workflow restriction not available for this group or plan`. There is no retry or repository-only fallback. Updates still use separate policy and repository-access requests, so failures can leave a partial change. Inspect with `runner-groups` before retrying. The read command paginates groups and selected repositories; a missing named group fails.
 
+`runners` reports rate-limit 403s and 429s as `ORG_RUNNERS_RATE_LIMITED` with `rate limited; retry later.`; a plain permission 403 remains `ORG_RUNNERS_FAILED` with the existing required-permission hint.
+
 ### Actions runner jobs
 
 `runner-jobs --org <org> [--repo <owner/name>]... [--status queued|in_progress]... [--max-runs <n>]` is read-only and uses the same App authentication and default cell route as `runners`. Without `--repo`, it paginates the installation's accessible repositories and selects those owned by the organization. A short, explicit `--repo` list is the fast path for capacity checks: it skips discovery and unrelated repositories. Repeat `--repo` to select repositories; every repository must belong to `--org`. Repository deduplication ignores case.

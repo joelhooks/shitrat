@@ -1,6 +1,6 @@
 import { Octokit } from "@octokit/rest"
 import { describe, expect, test } from "bun:test"
-import { ensureRunnerGroup, listOrgRunners, listRepoRunners, removeRepoRunner, listRunnerGroups, registrationToken, RunnerApiError } from "../src/org-runners.js"
+import { ensureRunnerGroup, listOrgRunners, listRepoRunners, removeRepoRunner, listRunnerGroups, registrationToken, RunnerApiError, RunnerRateLimitError } from "../src/org-runners.js"
 
 const repo = { id: 42, full_name: "example/project", private: true }
 const group = { id: 7, name: "isolated", visibility: "selected", allows_public_repositories: false }
@@ -321,6 +321,42 @@ describe("runners", () => {
     const gh = github(routes)
     expect(await listOrgRunners(gh.octokit, "example", "isolated")).toHaveLength(1)
     await expect(listOrgRunners(gh.octokit, "example", "missing")).rejects.toThrow("not found")
+    expect(writes(gh.calls)).toEqual([])
+  })
+})
+
+describe("runners rate limits", () => {
+  const collection = "GET /orgs/example/actions/runners?per_page=100"
+  const endpoint = "GET /orgs/{org}/actions/runners"
+  const cases = [
+    { name: "primary", status: 403, headers: { "x-ratelimit-remaining": "0" }, message: "fixture response" },
+    { name: "retry-after", status: 403, headers: { "retry-after": "30" }, message: "fixture response" },
+    { name: "secondary", status: 403, headers: {}, message: "You have exceeded a secondary rate limit" },
+    { name: "429", status: 429, headers: {}, message: "fixture response" },
+  ]
+  for (const scenario of cases) test(`${scenario.name} is not a permission failure`, async () => {
+    const gh = github({
+      [groupsRoute]: { body: { total_count: 0, runner_groups: [] } },
+      [collection]: { status: scenario.status, headers: scenario.headers, body: { message: `${scenario.message}: private-fixture-detail` } },
+    })
+    const error = await listOrgRunners(gh.octokit, "example").catch((error: unknown) => error)
+    expect(error).toBeInstanceOf(RunnerRateLimitError)
+    expect(error).toMatchObject({ code: "ORG_RUNNERS_RATE_LIMITED", endpoint, status: scenario.status, message: `${endpoint}: HTTP ${scenario.status}; rate limited; retry later.` })
+    expect(String(error)).not.toContain("requires")
+    expect(String(error)).not.toContain("private-fixture-detail")
+    expect(gh.calls.map(({ route }) => route)).toEqual([groupsRoute, collection])
+    expect(writes(gh.calls)).toEqual([])
+  })
+  test("a plain 403 retains the existing permission refusal", async () => {
+    const gh = github({
+      [groupsRoute]: { body: { total_count: 0, runner_groups: [] } },
+      [collection]: { status: 403, body: { message: "private-fixture-detail" } },
+    })
+    const error = await listOrgRunners(gh.octokit, "example").catch((error: unknown) => error)
+    expect(error).toBeInstanceOf(RunnerApiError)
+    expect(error).not.toBeInstanceOf(RunnerRateLimitError)
+    expect(String(error)).toBe(`Error: ${endpoint}: HTTP 403; requires organization_self_hosted_runners: read. Stop; do not change app permissions.`)
+    expect(String(error)).not.toContain("private-fixture-detail")
     expect(writes(gh.calls)).toEqual([])
   })
 })

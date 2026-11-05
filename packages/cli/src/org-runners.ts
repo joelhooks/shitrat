@@ -2,6 +2,7 @@ import { Octokit } from "@octokit/rest"
 import { Effect } from "effect"
 import { createInstallationToken, createTokenOctokit, parseRepo, type GitHubOctokit } from "./github-app.js"
 import { isCellPlaceholder } from "./github-cell.js"
+import { isGitHubRateLimit } from "./github-rate-limit.js"
 
 // Never retain an Octokit error: it can contain authorization headers or response tokens.
 export class RunnerApiError extends Error {
@@ -14,12 +15,21 @@ export class RunnerApiError extends Error {
   }
 }
 
+export class RunnerRateLimitError extends RunnerApiError {
+  readonly code = "ORG_RUNNERS_RATE_LIMITED"
+  constructor(endpoint: string, status: number | undefined) {
+    super(endpoint, status)
+    this.message = `${endpoint}: HTTP ${status}; rate limited; retry later.`
+  }
+}
+
 export const runnerApiCall = async <T>(endpoint: string, request: () => Promise<T>, permission?: string): Promise<T> => {
   try {
     return await request()
   } catch (error) {
     const status = typeof error === "object" && error !== null && "status" in error && typeof error.status === "number"
       ? error.status : undefined
+    if (isGitHubRateLimit(error)) throw new RunnerRateLimitError(endpoint, status)
     throw new RunnerApiError(endpoint, status, permission)
   }
 }
@@ -69,7 +79,7 @@ const groupPolicyCall = async <T>(endpoint: string, request: () => Promise<T>, w
   try {
     return await runnerApiCall(endpoint, request)
   } catch (error) {
-    if (workflowPolicy && error instanceof RunnerApiError && (error.status === 403 || error.status === 422)) {
+    if (workflowPolicy && error instanceof RunnerApiError && !(error instanceof RunnerRateLimitError) && (error.status === 403 || error.status === 422)) {
       throw new RunnerApiError(endpoint, error.status, undefined, true)
     }
     throw error
@@ -180,6 +190,7 @@ export const removeRepoRunner = async (octokit: GitHubOctokit, input: { repo: st
   await runnerApiCall(`DELETE ${endpoint}`, () => octokit.rest.actions.deleteSelfHostedRunnerFromRepo(params), "administration: write")
   const saved = await read().catch((error: unknown) => {
     // A successful DELETE is not proof of removal if verification cannot complete.
+    if (error instanceof RunnerRateLimitError) throw error
     if (error instanceof RunnerApiError) throw new RunnerApiError(`runner removal readback mismatch: ${error.endpoint}`, error.status, error.permission)
     throw new RunnerApiError("runner removal readback mismatch: request failed")
   })

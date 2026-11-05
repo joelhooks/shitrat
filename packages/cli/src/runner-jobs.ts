@@ -1,6 +1,7 @@
 import type { GitHubOctokit } from "./github-app.js"
 import { parseRepo } from "./github-app.js"
 import { RunnerApiError } from "./org-runners.js"
+import { isGitHubRateLimit } from "./github-rate-limit.js"
 
 export const runnerJobStatuses = ["queued", "in_progress"] as const
 export type RunnerJobStatus = typeof runnerJobStatuses[number]
@@ -56,13 +57,7 @@ const apiRead = async <T>(endpoint: string, read: (signal: AbortSignal) => Promi
   } catch (error) {
     const value = typeof error === "object" && error !== null ? error : {}
     const status = "status" in value && typeof value.status === "number" ? value.status : undefined
-    const response = "response" in value && typeof value.response === "object" && value.response !== null ? value.response : {}
-    const headers = "headers" in response && typeof response.headers === "object" && response.headers !== null ? response.headers : {}
-    const message = "message" in value && typeof value.message === "string" ? value.message : ""
-    const rateLimited = (status === 403 || status === 429) && (
-      "retry-after" in headers || ("x-ratelimit-remaining" in headers && String(headers["x-ratelimit-remaining"]) === "0") ||
-      /secondary rate limit/i.test(message) || status === 429
-    )
+    const rateLimited = isGitHubRateLimit(error)
     const timedOut = signal.aborted || ("name" in value && (value.name === "TimeoutError" || value.name === "AbortError"))
     throw new JobsApiError(endpoint, status, timedOut ? "timeout" : rateLimited ? "rate_limited" : "request_failed")
   } finally {

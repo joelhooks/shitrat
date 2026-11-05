@@ -1,7 +1,7 @@
 import { Command, Options } from "@effect/cli"
 import { Console, Effect, Option } from "effect"
 import { writeSync } from "node:fs"
-import { createOrgOctokit, ensureRunnerGroup, listOrgRunners, listRepoRunners, removeRepoRunner, listRunnerGroups, runnerWorkflowPolicy, registrationToken, RunnerApiError } from "../org-runners.js"
+import { createOrgOctokit, ensureRunnerGroup, listOrgRunners, listRepoRunners, removeRepoRunner, listRunnerGroups, runnerWorkflowPolicy, registrationToken, RunnerApiError, RunnerRateLimitError } from "../org-runners.js"
 import { parseRepo } from "../github-app.js"
 import { failure, json, success } from "../response.js"
 
@@ -28,7 +28,9 @@ export const runnerTokenCmd = Command.make("runner-token", { org: orgOption }, (
 ).pipe(Command.withDescription("Mint an org runner registration token; token only on stdout, expiry on stderr"))
 
 const failureEffect = (command: string, error: unknown) => Effect.gen(function* () {
-  yield* Console.log(json(failure(command, safeError(error), "ORG_RUNNERS_FAILED", "Check the existing App installation and endpoint permissions. Do not add App permissions.")))
+  const rateLimited = error instanceof RunnerRateLimitError
+  yield* Console.log(json(failure(command, safeError(error), rateLimited ? error.code : "ORG_RUNNERS_FAILED",
+    rateLimited ? "Retry later after the GitHub rate limit clears." : "Check the existing App installation and endpoint permissions. Do not add App permissions.")))
   process.exitCode = 1
 })
 
