@@ -26,6 +26,7 @@ export interface ErrorEnvelope {
   readonly error: {
     readonly message: string
     readonly code: string
+    readonly reason?: string
   }
   readonly fix: string
   readonly next_actions: readonly NextAction[]

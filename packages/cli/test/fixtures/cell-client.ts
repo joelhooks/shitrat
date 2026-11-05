@@ -7,7 +7,16 @@ if (process.env.CELL_TEST_ARGV) await appendFile(process.env.CELL_TEST_ARGV, `${
 const value = (name: string) => args[args.indexOf(name) + 1]
 const origin = process.env.SC_URL!
 const nonce = process.env.SC_FORWARD_NONCE
-if (process.env.CELL_TEST_NONCES) await appendFile(process.env.CELL_TEST_NONCES, `${JSON.stringify({ command: args[0], nonce: nonce ?? null })}\n`)
+if (process.env.CELL_TEST_NONCES) await appendFile(process.env.CELL_TEST_NONCES, `${JSON.stringify({ command: args.includes("--capabilities") ? "capabilities" : args[0], nonce: nonce ?? null })}\n`)
+if (args.includes("--capabilities")) {
+  // The launcher supplies no identity, URL, pass or nonce to the probe.
+  if (["SC_IDENTITY_JSON", "SC_URL", "SC_AUDIENCE", "SC_PASS_FILE", "SC_FORWARD_NONCE", "SHITRAT_GITHUB_PRIVATE_KEY"].some((key) => process.env[key] !== undefined)) process.exit(8)
+  const mode = process.env.CELL_TEST_CAPABILITY_MODE
+  if (mode === "old") { process.stderr.write("usage: sc forward --listen <address> --upstream-host <host>\n"); process.exit(2) }
+  if (mode === "timeout") { setInterval(() => {}, 60_000); await new Promise(() => {}) }
+  process.stdout.write(mode === "garbage" ? "not JSON\n" : mode === "missing" ? '{"other":true}\n' : mode === "false" ? '{"forwardNonce":false}\n' : mode === "extra" ? '{"forwardNonce":true,"other":true}\n' : '{"forwardNonce":true}\n')
+  process.exit(0)
+}
 if (process.env.CELL_TEST_FORWARD_FAIL === "1" && args.includes("forward")) {
   process.stdout.write(nonce ?? "")
   process.stderr.write((nonce ?? "") + (process.env.SC_IDENTITY_JSON ?? ""))

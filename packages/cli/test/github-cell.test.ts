@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { createPublicKey, generateKeyPairSync, verify } from "node:crypto"
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { buildCellGitInvocation } from "../src/git-push.js"
@@ -29,12 +29,17 @@ const scenario = async (input: {
   forwardFailure?: boolean
   unavailableClient?: boolean
   gitTracing?: boolean
+  capability?: "old" | "garbage" | "timeout" | "missing" | "false" | "extra"
+  oldClient?: boolean
   missingDocument?: boolean
   documentMismatch?: "did" | "key"
   git?: (home: string, run: (args: string[]) => Promise<Result>) => Promise<Result>
 }) => {
   const home = await mkdtemp(path.join(tmpdir(), "shitrat-cell-test-"))
-  await chmod(fixture, 0o755)
+  const client = path.join(home, "sc-fixture.ts")
+  // The probe has no inherited test hooks; the fake executable owns its fixture
+  // configuration, just as a real executable owns its capability implementation.
+  await writeFile(client, `#!${process.execPath}\nprocess.env.CELL_TEST_ARGV = ${JSON.stringify(path.join(home, "argv"))};\nprocess.env.CELL_TEST_NONCES = ${JSON.stringify(path.join(home, "nonces"))};\nprocess.env.CELL_TEST_CAPABILITY_MODE = ${JSON.stringify(input.capability ?? "supported")};\nawait import(${JSON.stringify(fixture)});\n`, { mode: 0o755 })
   const documentFile = path.join(home, "caller-public.json")
   const did = "did:web:fixture.example.invalid"
   await writeFile(documentFile, JSON.stringify({
@@ -48,7 +53,7 @@ const scenario = async (input: {
     async fetch(request) {
       const url = new URL(request.url)
       expect(request.headers.has("x-sc-forward-token")).toBe(false)
-      if (process.env.SHITRAT_TEST_SC_BIN && !input.forwardFailure) {
+      if (process.env.SHITRAT_TEST_SC_BIN && !input.forwardFailure && !input.capability && !input.mode?.startsWith("nonce-")) {
         const token = request.headers.get("x-sc-auth") ?? ""
         const [header, payload, signature] = token.split(".")
         expect(header && payload && signature).toBeTruthy()
@@ -102,7 +107,7 @@ const scenario = async (input: {
         ...(!input.missingIdentity ? { SC_IDENTITY_JSON: identity } : {}),
         ...(input.identityFile ? { SHITRAT_CELL_IDENTITY_FILE: input.identityFile } : {}),
         ...(!input.missingDocument ? { SHITRAT_CELL_CALLER_DOCUMENT_FILE: documentFile } : {}),
-        SHITRAT_SC_BIN: input.unavailableClient ? path.join(home, "missing-sc") : input.forwardFailure || input.mode?.startsWith("nonce-") ? fixture : process.env.SHITRAT_TEST_SC_BIN ?? fixture,
+        SHITRAT_SC_BIN: input.oldClient ? process.env.SHITRAT_TEST_OLD_SC_BIN : input.unavailableClient ? path.join(home, "missing-sc") : input.forwardFailure || input.capability || input.mode?.startsWith("nonce-") ? client : process.env.SHITRAT_TEST_SC_BIN ?? client,
         SC_FORWARD_NONCE: "inherited-nonce-must-be-replaced-not-forwarded",
         CELL_TEST_NONCES: path.join(home, "nonces"), CELL_TEST_FORWARD_REQUESTS: path.join(home, "forward-requests"),
         ...(input.mode === "nonce-refusal" ? { CELL_TEST_NONCE_REFUSAL: "1" } : {}),
@@ -139,7 +144,7 @@ const scenario = async (input: {
       }
     }
     for (const request of forwardRequests) expect(request.token).toBe(request.nonce)
-    return { stdout, stderr, exit, argv, nonces, forwardRequests, gitChildren, gitTrace, direct: await readOrEmpty(path.join(home, "direct")), seen }
+    return { stdout, stderr, exit, argv, nonces: nonces.filter((record) => record.command === "forward"), probes: nonces.filter((record) => record.command === "capabilities").length, forwardRequests, gitChildren, gitTrace, direct: await readOrEmpty(path.join(home, "direct")), seen }
   }
   try {
     if (input.git) return await input.git(home, run)
@@ -149,9 +154,62 @@ const scenario = async (input: {
     await rm(home, { recursive: true, force: true })
   }
 }
-type Result = { stdout: string; stderr: string; exit: number; argv: string; nonces: NonceRecord[]; forwardRequests: ForwardRequest[]; gitChildren: GitChild[]; gitTrace: string; direct: string; seen: Seen[] }
+type Result = { stdout: string; stderr: string; exit: number; argv: string; nonces: NonceRecord[]; probes: number; forwardRequests: ForwardRequest[]; gitChildren: GitChild[]; gitTrace: string; direct: string; seen: Seen[] }
 
 describe("GitHub cell route", () => {
+  for (const capability of ["old", "garbage", "timeout", "missing", "false"] as const) test(`unsupported sc capability refuses before describe/forward without fallback (${capability})`, async () => {
+    const result = await scenario({ via: "cell", fallback: "direct", capability, cli: true })
+    expect(result.exit).toBe(1)
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: { code: "GITHUB_CELL_ERROR", reason: "configuration", message: "Cell route failed (configuration). sc too old for forward nonce; update sc" } })
+    expect(result.probes).toBe(1)
+    expect(result.nonces).toEqual([])
+    expect(result.forwardRequests).toEqual([])
+    expect(result.seen).toEqual([])
+    expect(result.direct).toBe("")
+    expect(result.stderr).not.toContain("usage:")
+    expect(result.stderr).not.toContain('"path":"direct"')
+  }, 10_000)
+  test.skipIf(!process.env.SHITRAT_TEST_OLD_SC_BIN)("real old sc is refused without a forward or setup fallback", async () => {
+    const result = await scenario({ via: "cell", fallback: "direct", oldClient: true, cli: true })
+    expect(result.exit).toBe(1)
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: { code: "GITHUB_CELL_ERROR", reason: "configuration", message: "Cell route failed (configuration). sc too old for forward nonce; update sc" } })
+    expect(result.seen).toEqual([])
+    expect(result.forwardRequests).toEqual([])
+    expect(result.direct).toBe("")
+    expect(result.stderr).not.toContain('"path":"direct"')
+  })
+  test("capability results accept extra fields and are cached once per command", async () => {
+    const result = await scenario({ via: "cell", capability: "extra", mode: "parallel" })
+    expect(result.exit).toBe(0)
+    expect(result.probes).toBe(1)
+    expect(result.nonces).toHaveLength(1)
+    expect(result.forwardRequests).toHaveLength(2)
+  })
+  test("capability refusals are cached for standalone adapter attempts too", async () => {
+    const result = await scenario({ via: "cell", capability: "old", mode: "nonce-refusal" })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout).errors).toEqual(Array(2).fill({ reason: "configuration", message: "Cell route failed (configuration). sc too old for forward nonce; update sc" }))
+    expect(result.probes).toBe(1)
+    expect(result.nonces).toEqual([])
+    expect(result.seen).toEqual([])
+  })
+  test("aborts and timeouts retain their kinds without reflecting transport diagnostics", async () => {
+    const result = await scenario({ via: "cell", mode: "transport-errors" })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout).errors).toEqual([
+      { name: "AbortError", message: "cell forward request aborted" },
+      { name: "TimeoutError", message: "cell forward request timed out" },
+    ])
+    expect(result.stdout + result.stderr).not.toContain("fixture transport details")
+    expect(result.seen).toEqual([])
+  })
+  for (const cliArgs of [["status", "example/project"], ["comment", "example/project", "1", "--body", "fixture"]]) test(`${cliArgs[0]} preserves a typed nonce refusal and exits nonzero`, async () => {
+    const result = await scenario({ via: "cell", fallback: "direct", mode: "nonce-refusal", cli: true, cliArgs })
+    expect(result.exit).toBe(1)
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: { code: "GITHUB_CELL_ERROR", reason: "client", message: "Cell route failed (client). cell forward rejected the run nonce; rerun" } })
+    expect(result.forwardRequests).toHaveLength(1)
+    expect(result.direct).toBe("")
+  })
   test("separate command runs generate different 32-byte nonces", async () => {
     const first = await scenario({ via: "cell", mode: "nonce-echo" })
     const second = await scenario({ via: "cell", mode: "nonce-echo" })
@@ -208,7 +266,7 @@ describe("GitHub cell route", () => {
     if (!process.env.SHITRAT_TEST_SC_BIN) {
       expect(result.forwardRequests).toHaveLength(2)
       expect(new Set(result.forwardRequests.map((request) => request.token)).size).toBe(1)
-      const forwards: string[][] = result.argv.trim().split("\n").map((line) => JSON.parse(line)).filter((args) => args.includes("forward"))
+      const forwards: string[][] = result.argv.trim().split("\n").map((line) => JSON.parse(line)).filter((args) => args.includes("forward") && !args.includes("--capabilities"))
       expect(forwards).toHaveLength(1)
       const args = forwards[0]!
       const listen = args[args.indexOf("--listen") + 1]!
@@ -254,7 +312,7 @@ describe("GitHub cell route", () => {
     expect(result.stdout).not.toContain("Installation token lacks")
     expect(result.direct).toBe("")
     expect(result.seen.map((request) => request.path)).toEqual(["/v1/describe"])
-    expect(result.argv).not.toContain("forward")
+    expect(result.argv).not.toContain("--listen")
   })
   test("status CLI works without direct installation discovery", async () => {
     const result = await scenario({ via: "cell", cli: true })
@@ -297,7 +355,7 @@ describe("GitHub cell route", () => {
     ])
     expect(result.direct).toBe("")
     expect(calls.every((request) => request.authorization === "Bearer {{secret:shitrat-github/example}}")).toBe(true)
-    if (!process.env.SHITRAT_TEST_SC_BIN) expect(result.argv.trim().split("\n").map((line) => JSON.parse(line)).filter((args: string[]) => args.includes("forward"))).toHaveLength(1)
+    if (!process.env.SHITRAT_TEST_SC_BIN) expect(result.argv.trim().split("\n").map((line) => JSON.parse(line)).filter((args: string[]) => args.includes("forward") && !args.includes("--capabilities"))).toHaveLength(1)
   })
   test("runners CLI follows a GitHub next link through the same cell forward", async () => {
     const result = await scenario({ via: "cell", cli: true, cliArgs: ["runners", "--repo", "example/project"] })
@@ -310,21 +368,21 @@ describe("GitHub cell route", () => {
     expect(calls.map((request) => new URLSearchParams(request.search).get("page") ?? "1")).toEqual(["1", "2"])
     expect(result.direct).toBe("")
     expect(result.seen).toHaveLength(3)
-    if (!process.env.SHITRAT_TEST_SC_BIN) expect(result.argv.trim().split("\n").map((line) => JSON.parse(line)).filter((args: string[]) => args.includes("forward"))).toHaveLength(1)
+    if (!process.env.SHITRAT_TEST_SC_BIN) expect(result.argv.trim().split("\n").map((line) => JSON.parse(line)).filter((args: string[]) => args.includes("forward") && !args.includes("--capabilities"))).toHaveLength(1)
   })
   for (const config of [{ missingIdentity: true }, { identityFile: "/fixture/identity.json" }]) test(`identity source refuses invalid configuration ${JSON.stringify(config)}`, async () => {
     const result = await scenario({ via: "cell", ...config })
     expect(result.exit).toBe(1)
     expect(result.direct).toBe("")
     expect(result.seen).toEqual([])
-    expect(result.argv).toBe("")
+    expect(result.argv).not.toContain("--listen")
   })
   for (const config of [{ missingDocument: true }, { documentMismatch: "did" as const }, { documentMismatch: "key" as const }]) test(`caller document pin refuses before sc ${JSON.stringify(config)}`, async () => {
     const result = await scenario({ via: "cell", ...config })
     expect(result.exit).toBe(1)
     expect(result.direct).toBe("")
     expect(result.seen).toEqual([])
-    expect(result.argv).toBe("")
+    expect(result.argv).not.toContain("--listen")
   })
   test("refusal never silently falls back", async () => {
     const result = await scenario({ via: "cell", refusal: true })
@@ -356,11 +414,12 @@ describe("GitHub cell route", () => {
     expect(result.direct).toBe("")
     expect(result.seen).toEqual([])
   })
-  test("explicit missing-client fallback logs cell-client", async () => {
+  test("unavailable capability probe refuses even with explicit setup fallback", async () => {
     const result = await scenario({ via: "cell", unavailableClient: true, fallback: "direct" })
-    expect(result.exit).toBe(0)
-    expect(result.stderr).toContain('"reason":"cell-client"')
-    expect(JSON.parse(result.stdout).data.direct).toBe(true)
+    expect(result.exit).toBe(1)
+    expect(result.direct).toBe("")
+    expect(result.stderr).not.toContain('"path":"direct"')
+    expect(result.seen).toEqual([])
   })
   test("forwarder failure suppresses raw child diagnostics and does not replay direct", async () => {
     const result = await scenario({ via: "cell", fallback: "direct", forwardFailure: true })
@@ -408,6 +467,7 @@ describe("GitHub cell route", () => {
       const pushed = await run(["push", "https://github.com/example/project.git", "HEAD:refs/heads/main"])
       expect(pushed.exit).toBe(0)
       if (!process.env.SHITRAT_TEST_SC_BIN) {
+        expect(pushed.probes).toBe(1)
         expect(pushed.nonces).toHaveLength(2)
         expect(new Set(pushed.nonces.map((record) => record.nonce)).size).toBe(1)
         expect(new Set(pushed.forwardRequests.map((request) => request.token)).size).toBe(1)
@@ -417,7 +477,10 @@ describe("GitHub cell route", () => {
       expect(fetched.exit).toBe(0)
       expect(fetched.gitChildren).toHaveLength(2)
       expect(fetched.gitTrace).toBe("")
-      if (!process.env.SHITRAT_TEST_SC_BIN) expect(new Set(fetched.nonces.map((record) => record.nonce)).size).toBe(2)
+      if (!process.env.SHITRAT_TEST_SC_BIN) {
+        expect(fetched.probes).toBe(2)
+        expect(new Set(fetched.nonces.map((record) => record.nonce)).size).toBe(2)
+      }
       expect(await git(["rev-parse", "refs/remotes/cell/main"], local)).toBe(sha)
       expect(fetched.seen.some((request) => request.body.includes(Buffer.from("PACK")))).toBe(true)
       expect(fetched.seen.filter((request) => request.path.startsWith("/v1/u/github.com")).every((request) => request.authorization === "{{secret-basic:user=x-access-token,password=shitrat-github/example}}")).toBe(true)

@@ -373,7 +373,7 @@ describe("cli json output", () => {
         "--dry-run",
       )
 
-      expect(result.exitCode).toBe(0)
+      expect(result.exitCode).toBe(1)
       expect(result.stderr).toBe("")
       expect(result.json.ok).toBe(false)
       expect(result.stdout).toContain("Use a relative path")
