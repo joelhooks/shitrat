@@ -118,6 +118,8 @@ export const selectGitHubPath = async <T>(input: {
     return input.direct()
   }
   logGitHubPath("cell", "requested")
+  // Compatibility is a security boundary, not a setup failure eligible for fallback.
+  await requireForwardNonceSupport()
   try {
     return await input.cell()
   } catch (error) {
@@ -156,8 +158,62 @@ const availablePort = async (): Promise<number> => {
 type CellHost = "api.github.com" | "github.com"
 type CellForward = { readonly origin: string; readonly proc: Bun.Subprocess; readonly stop: () => Promise<void> }
 type CachedForward = Promise<CellForward> | GitHubCellError
-type CellCommand = { readonly nonce: string; readonly forwards: Map<CellHost, CachedForward> }
+type CellCommand = { readonly nonce: string; readonly forwards: Map<CellHost, CachedForward>; capability?: Promise<void> }
 const commandForwards = new AsyncLocalStorage<CellCommand>()
+
+const probeForwardNonceSupport = async (): Promise<void> => {
+  requireBun()
+  const unsupported = () => new GitHubCellError("configuration", "sc too old for forward nonce; update sc")
+  let proc: Bun.Subprocess<"ignore", "pipe", "ignore">
+  try {
+    proc = Bun.spawn([process.env.SHITRAT_SC_BIN ?? "sc", "forward", "--capabilities"], {
+      // This probe needs no identity, pass, cell address or nonce.
+      env: { PATH: process.env.PATH }, stdin: "ignore", stdout: "pipe", stderr: "ignore",
+    })
+  } catch {
+    throw unsupported()
+  }
+  const reader = proc.stdout.getReader()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      (async () => {
+        let output = ""
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          output += new TextDecoder().decode(value)
+          if (output.length > 8192) throw unsupported()
+        }
+        const exit = await proc.exited
+        const capability: unknown = JSON.parse(output)
+        if (exit !== 0 || typeof capability !== "object" || capability === null || !("forwardNonce" in capability) || capability.forwardNonce !== true) throw unsupported()
+      })(),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(unsupported()), 3_000) }),
+    ])
+  } catch {
+    throw unsupported()
+  } finally {
+    clearTimeout(timer)
+    proc.kill("SIGKILL")
+    await proc.exited
+    await reader.cancel().catch(() => {})
+  }
+}
+
+const requireForwardNonceSupport = (): Promise<void> => {
+  const command = commandForwards.getStore()
+  if (!command) return probeForwardNonceSupport()
+  return command.capability ??= probeForwardNonceSupport()
+}
+
+const transportFailure = (error: unknown): Error => {
+  if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+    // Retain the kind without reflecting an arbitrary abort reason or request headers.
+    return new DOMException(error.name === "AbortError" ? "cell forward request aborted" : "cell forward request timed out", error.name)
+  }
+  return new GitHubCellError("client")
+}
 
 // Lifecycle: absent -> starting (shared promise) -> ready or failed -> stopped.
 // Retain failed starts and terminal refusals until command exit: never replay an uncertain operation.
@@ -180,6 +236,7 @@ export const withCellCommand = async <T>(run: () => Promise<T>): Promise<T> => {
 
 const startCellForward = async (host: CellHost, nonce: string): Promise<CellForward> => {
   requireBun()
+  await requireForwardNonceSupport()
   const port = await availablePort()
   const config = await clientConfiguration()
   const args = [...config.args, "forward", "--listen", `127.0.0.1:${port}`, "--upstream-host", host]
@@ -276,8 +333,8 @@ export const cellFetch: typeof fetch = Object.assign(async (input: string | URL 
         headers,
         redirect: "manual",
         signal: init?.signal ?? AbortSignal.timeout(60_000),
-      }).catch(() => { throw new GitHubCellError("client") })
-      const body = await response.arrayBuffer().catch(() => { throw new GitHubCellError("client") })
+      }).catch((error: unknown) => { throw transportFailure(error) })
+      const body = await response.arrayBuffer().catch((error: unknown) => { throw transportFailure(error) })
       if (response.status === 403) {
         let refusal: unknown
         try { refusal = JSON.parse(new TextDecoder().decode(body)) } catch { /* Not a forward refusal. */ }

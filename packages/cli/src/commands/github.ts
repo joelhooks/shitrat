@@ -32,7 +32,7 @@ import {
   scanPatch,
 } from "../public-push-guard.js"
 import { attestPushedSha, withAttest } from "../attest.js"
-import { isCellPlaceholder } from "../github-cell.js"
+import { GitHubCellError, isCellPlaceholder } from "../github-cell.js"
 import { CiReadError, isFailingRun, readChecks, readJobLog, readPullRequestStatus, rerunWorkflowRun } from "../ci-reads.js"
 import { labelIssue, setCommitStatus } from "../labels-statuses.js"
 import { createAnnotatedTag, createGitHubRelease, GitHubReleaseError } from "../github-releases.js"
@@ -254,7 +254,24 @@ const printFailure = (
   code: string,
   fix: string,
   nextActions: readonly NextAction[] = [],
-) => Console.log(json(failure(command, errorMessage(error), code, fix, nextActions)))
+) => Effect.gen(function* () {
+  // All commands sharing this wrapper must fail closed for shell callers.
+  process.exitCode = 1
+  // Effect's default tryPromise and Octokit both wrap causes. Preserve a typed
+  // cell refusal without reflecting arbitrary nested transport diagnostics.
+  const seen = new Set<unknown>()
+  let cause = error
+  while (typeof cause === "object" && cause !== null && !seen.has(cause)) {
+    if (cause instanceof GitHubCellError) {
+      const envelope = failure(command, cause.message, cause.code, fix, nextActions)
+      yield* Console.log(json({ ...envelope, error: { ...envelope.error, reason: cause.reason } }))
+      return
+    }
+    seen.add(cause)
+    cause = "cause" in cause ? cause.cause : undefined
+  }
+  yield* Console.log(json(failure(command, errorMessage(error), code, fix, nextActions)))
+})
 
 // CI commands exit non-zero on failure so shell watches fail closed; the envelope carries the typed code.
 const printCiFailure = (command: string, error: unknown, code: string, fix: string) =>
@@ -741,9 +758,10 @@ export const statusCmd = Command.make("status", { repo: repoArg }, ({ repo }) =>
     const repoRef = parseRepo(repo)
     const installationId = process.env.SHITRAT_GITHUB_VIA === "cell" ? undefined : yield* resolveInstallationId(repoRef.owner)
     const { octokit, token } = yield* createRepoOctokit(repoRef)
-    const repository = yield* Effect.tryPromise(() =>
-      octokit.rest.repos.get({ owner: repoRef.owner, repo: repoRef.repo }),
-    )
+    const repository = yield* Effect.tryPromise({
+      try: () => octokit.rest.repos.get({ owner: repoRef.owner, repo: repoRef.repo }),
+      catch: toError,
+    })
 
     yield* printSuccess(
       `status ${repoRef.fullName}`,

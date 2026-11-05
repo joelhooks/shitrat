@@ -9,7 +9,7 @@ Bun.spawn = new Proxy(spawn, {
   apply(target, thisArg, args) {
     const proc = Reflect.apply(target, thisArg, args)
     const argv = args[0] as string[]
-    if (argv.includes("forward")) {
+    if (argv.includes("forward") && !argv.includes("--capabilities")) {
       child = proc
       port = Number(argv[argv.indexOf("--listen") + 1]!.split(":")[1])
       forwardSpawns += 1

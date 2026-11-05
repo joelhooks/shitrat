@@ -6,7 +6,21 @@ import { cellFetch, GitHubCellError, withCellCommand } from "../../src/github-ce
 
 try {
   await withCellCommand(async () => {
-    if (process.argv[2] === "nonce-refusal" || process.argv[2] === "nonce-echo") {
+    if (process.argv[2] === "transport-errors") {
+      const errors = []
+      for (const kind of ["AbortError", "TimeoutError"]) {
+        try {
+          await cellFetch("https://api.github.com/repos/example/project", {
+            headers: { authorization: "Bearer {{secret:shitrat-github/example}}" },
+            signal: AbortSignal.abort(new DOMException("fixture transport details must not escape", kind)),
+          })
+        } catch (error) {
+          if (!(error instanceof Error)) throw error
+          errors.push({ name: error.name, message: error.message })
+        }
+      }
+      process.stdout.write(JSON.stringify({ errors }))
+    } else if (process.argv[2] === "nonce-refusal" || process.argv[2] === "nonce-echo") {
       const request = () => cellFetch("https://api.github.com/repos/example/project", {
         headers: { authorization: "Bearer {{secret:shitrat-github/example}}", "x-sc-forward-token": "caller-must-not-control-the-nonce" },
       })
