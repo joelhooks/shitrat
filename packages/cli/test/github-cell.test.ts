@@ -322,6 +322,14 @@ describe("GitHub cell route", () => {
     expect(result.seen.map((request) => request.path)).toEqual(["/v1/describe"])
     expect(result.argv).not.toContain("--listen")
   })
+  test("direct-mode status retains installation_id from the selected token", async () => {
+    const result = await scenario({ via: "direct", cli: true })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, result: { repo: "example/project", installation_id: 123 } })
+    expect(result.direct).toContain("/app/installations/123/access_tokens")
+    expect(result.argv).toBe("")
+    expect(result.seen).toEqual([])
+  })
   for (const via of [undefined, "cell"]) test(`status CLI works without direct installation discovery (via=${via ?? "unset"})`, async () => {
     const result = await scenario({ ...(via === undefined ? {} : { via }), cli: true })
     expect(result.exit).toBe(0)
@@ -422,11 +430,58 @@ describe("GitHub cell route", () => {
     expect(result.seen).toEqual([])
     expect(result.stderr).toContain('"path":"direct"')
   })
-  for (const mode of ["fallback-after-request", "fallback-app-after-request", "fallback-untyped"]) test(`${mode} cannot authorize direct fallback`, async () => {
+  test("a Git push failure after reaching the forward never replays through direct", async () => {
+    await scenario({ fallback: "direct", mode: "fallback-git-push", fetchRefusal: true, git: async (home, run) => {
+      const local = path.join(home, "local")
+      for (const args of [
+        ["init", "-b", "main", local],
+        ["-C", local, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture"],
+      ]) {
+        const proc = Bun.spawn(["git", ...args], { stdout: "ignore", stderr: "ignore" })
+        expect(await proc.exited).toBe(0)
+      }
+      const result = await run(["push", "https://github.com/example/project.git", "HEAD:refs/heads/main"])
+      expect(result.exit).toBe(0)
+      expect(JSON.parse(result.stdout)).toMatchObject({ directCalls: 0, error: { reason: "refused" } })
+      expect(result.seen).toHaveLength(1)
+      expect(result.seen[0]!.path).toBe("/v1/u/github.com/example/project.git/info/refs")
+      expect(new URLSearchParams(result.seen[0]!.search).get("service")).toBe("git-receive-pack")
+      expect(result.gitChildren).toHaveLength(1)
+      expect(result.gitChildren[0]!.args).toContain("push")
+      expect(result.direct).toBe("")
+      expect(result.stderr).not.toContain('"path":"direct"')
+      return result
+    } })
+  })
+  test("an untyped setup error preserves the original error and cannot fall back", async () => {
+    const result = await scenario({ fallback: "direct", mode: "fallback-untyped" })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({ directCalls: 0, originalPreserved: true, error: { name: "Error", message: "fixture unknown failure" } })
+    expect(result.seen).toEqual([])
+    expect(result.direct).toBe("")
+    expect(result.stderr).not.toContain('"path":"direct"')
+  })
+  test("missing command state rethrows the original setup error without falling back", async () => {
+    const result = await scenario({ fallback: "direct", mode: "fallback-missing-store" })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ directCalls: 0, originalPreserved: true, error: { reason: "configuration", message: "Cell route failed (configuration). fixture missing command state" } })
+    expect(result.seen).toEqual([])
+    expect(result.direct).toBe("")
+    expect(result.stderr).not.toContain('"path":"direct"')
+  })
+  for (const mode of ["fallback-unlisted-reason", "fallback-unsupported"]) test(`${mode} is outside the setup fallback allow-list`, async () => {
+    const result = await scenario({ fallback: "direct", mode })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ directCalls: 0, error: { reason: mode === "fallback-unlisted-reason" ? "future-setup-reason" : "unsupported" } })
+    expect(result.seen).toEqual([])
+    expect(result.direct).toBe("")
+    expect(result.stderr).not.toContain('"path":"direct"')
+  })
+  for (const mode of ["fallback-after-request", "fallback-app-after-request"]) test(`${mode} cannot authorize direct fallback`, async () => {
     const result = await scenario({ fallback: "direct", mode })
     expect(result.exit).toBe(0)
     expect(JSON.parse(result.stdout)).toMatchObject({ directCalls: 0, error: {} })
-    expect(result.seen).toHaveLength(mode === "fallback-untyped" ? 0 : 1)
+    expect(result.seen).toHaveLength(1)
     expect(result.direct).toBe("")
     expect(result.stderr).not.toContain('"path":"direct"')
   })

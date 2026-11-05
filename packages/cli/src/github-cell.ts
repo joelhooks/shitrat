@@ -10,6 +10,10 @@ export class GitHubCellError extends Error {
   }
 }
 
+// Only these bounded reasons may describe pre-request setup failures. New
+// reasons must be reviewed explicitly instead of inheriting fallback permission.
+const setupFallbackReasons: ReadonlySet<GitHubCellError["reason"]> = new Set(["configuration", "client", "refused"])
+
 export const logGitHubPath = (path: "cell" | "direct", reason: string): void => {
   process.stderr.write(`${JSON.stringify({ event: "github-route", path, reason })}\n`)
 }
@@ -126,8 +130,8 @@ export const selectGitHubPath = async <T>(input: {
     // Fallback is legal only for bounded setup failures before *any* forwarded
     // operation in this command. Never replay an uncertain write over direct.
     if (process.env.SHITRAT_GITHUB_CELL_FALLBACK !== "direct" ||
-      commandForwards.getStore()!.phase !== "setup" ||
-      !(error instanceof GitHubCellError) || error.reason === "unsupported") throw error
+      commandForwards.getStore()?.phase !== "setup" ||
+      !(error instanceof GitHubCellError) || !setupFallbackReasons.has(error.reason)) throw error
     logGitHubPath("direct", `cell-${error.reason}`)
     return input.direct()
   }
@@ -138,7 +142,7 @@ export const requireDirectGitHub = (): void => {
     logGitHubPath("direct", "selected")
     return
   }
-  if (process.env.SHITRAT_GITHUB_CELL_FALLBACK !== "direct" || commandForwards.getStore()?.phase === "requested") {
+  if (process.env.SHITRAT_GITHUB_CELL_FALLBACK !== "direct" || commandForwards.getStore()?.phase !== "setup") {
     logGitHubPath("cell", "unsupported-app-operation")
     throw new GitHubCellError("unsupported")
   }
@@ -294,7 +298,9 @@ export const withCellForward = <T>(input: {
   readonly host: CellHost
   readonly run: (origin: string, nonce: string) => Promise<T>
 }): Promise<T> => withCellCommand(async () => {
-  const { forwards, nonce } = commandForwards.getStore()!
+  const command = commandForwards.getStore()
+  if (!command) throw new GitHubCellError("client")
+  const { forwards, nonce } = command
   let forward = forwards.get(input.host)
   if (!forward) {
     forward = startCellForward(input.host, nonce)
@@ -312,7 +318,7 @@ export const withCellForward = <T>(input: {
   }
   // Both API fetch and smart-HTTP Git cross this boundary. Mark before invoking
   // the transport, even if it fails before a response can prove what happened.
-  commandForwards.getStore()!.phase = "requested"
+  command.phase = "requested"
   return input.run(ready.origin, nonce)
 })
 
@@ -348,9 +354,9 @@ export const cellFetch: typeof fetch = Object.assign(async (input: string | URL 
         try { refusal = JSON.parse(new TextDecoder().decode(body)) } catch { /* Not a forward refusal. */ }
         if (typeof refusal === "object" && refusal !== null && "what" in refusal && refusal.what === "forward nonce refused") {
           const error = new GitHubCellError("client", "cell forward rejected the run nonce; rerun")
-          const forwards = commandForwards.getStore()!.forwards
-          const forward = forwards.get("api.github.com")
-          forwards.set("api.github.com", error)
+          const forwards = commandForwards.getStore()?.forwards
+          const forward = forwards?.get("api.github.com")
+          forwards?.set("api.github.com", error)
           if (forward && !(forward instanceof GitHubCellError)) await (await forward).stop()
           throw error
         }
