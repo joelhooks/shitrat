@@ -397,7 +397,7 @@ describe("GitHub cell route", () => {
     const result = await scenario({ cli: true, cliArgs: ["runner-jobs", "--org", "example"] })
     expect(result.exit).toBe(0)
     const envelope = JSON.parse(result.stdout)
-    expect(envelope).toMatchObject({ ok: true, command: "shitrat runner-jobs", next_actions: [], result: { org: "example", count: 16, errors: [] } })
+    expect(envelope).toMatchObject({ ok: true, command: "shitrat runner-jobs", next_actions: [], result: { org: "example", count: 16, errors: [], truncated: [] } })
     expect(envelope.result.jobs[0]).toEqual({ repo: "example/project-1", runId: 1, jobId: 1, name: "build", status: "queued", labels: ["self-hosted", "linux", "pool-a"], runnerName: "runner-1", runnerGroupName: "pool-a", createdAt: "2026-01-01T00:00:00Z", startedAt: null })
     const calls = result.seen.filter((request) => request.path.startsWith("/v1/u/"))
     expect(calls).toHaveLength(26)
@@ -405,12 +405,25 @@ describe("GitHub cell route", () => {
     expect(result.direct).toBe("")
     expect(result.nonces).toHaveLength(1)
   })
+  test("runner-jobs CLI invalid cap emits failure JSON and exits 1 before auth", async () => {
+    const result = await scenario({ cli: true, cliArgs: ["runner-jobs", "--org", "example", "--max-runs", "0"] })
+    expect(result.exit).toBe(1)
+    expect(JSON.parse(result.stdout)).toEqual({ ok: false, command: "shitrat runner-jobs", result: null,
+      error: { code: "RUNNER_JOBS_FAILED", message: "--max-runs must be a positive safe integer: request failed" },
+      fix: "Check the existing App installation and Actions read access. Do not add App permissions.", next_actions: [] })
+    expect(result.seen).toEqual([])
+    expect(result.direct).toBe("")
+  })
   test("runner-jobs CLI accepts repeated repo and status flags and a run cap", async () => {
     const result = await scenario({ cli: true, cliArgs: ["runner-jobs", "--org", "example", "--repo", "example/one", "--repo", "example/two", "--status", "queued", "--status", "in_progress", "--max-runs", "1"] })
     expect(result.exit).toBe(0)
     const envelope = JSON.parse(result.stdout)
     expect(envelope.result.count).toBe(8)
     expect(envelope.result.errors).toEqual([])
+    expect(envelope.result.truncated).toEqual([
+      { repo: "example/one", status: "queued" }, { repo: "example/one", status: "in_progress" },
+      { repo: "example/two", status: "queued" }, { repo: "example/two", status: "in_progress" },
+    ])
     expect([...new Set(envelope.result.jobs.map((job: { repo: string }) => job.repo))]).toEqual(["example/one", "example/two"])
     expect(result.seen.some((request) => request.path.endsWith("/installation/repositories"))).toBe(false)
     expect(result.seen.filter((request) => request.path.endsWith("/actions/runs"))).toHaveLength(4)
