@@ -19,7 +19,7 @@ const run = async (scenario = "behind", args = ["--branch", "land/abc1234", "--y
       if (scenario === "symlink-log") { await writeFile(path.join(home, "untouched.jsonl"), '{"outcome":"prior"}\n'); await symlink(path.join(home, "untouched.jsonl"), customLog) }
     }
     const proc = Bun.spawn([process.execPath, "--preload", path.join(import.meta.dir, "fixtures/delete-branch-preload.ts"), path.join(import.meta.dir, "../src/cli.ts"), "delete-branch", ...args.map((arg) => arg === "FILE" ? path.join(home, "branches.txt") : arg === "EMPTY" ? path.join(home, "empty.txt") : arg === "LOG" ? customLog : arg), repo], {
-      env: { PATH: process.env.PATH, HOME: home, SHITRAT_GITHUB_APP_ID: "123", SHITRAT_GITHUB_PRIVATE_KEY: privateKey, SHITRAT_GITHUB_CLIENT_ID: "test-client", SHITRAT_GITHUB_INSTALLATIONS_JSON: `{"${repo.split("/")[0]}":123}`, DELETE_BRANCH_TEST_AUDIT: audit, DELETE_BRANCH_TEST_SCENARIO: scenario, DELETE_BRANCH_TEST_REPO: repo, ...fixture },
+      env: { PATH: process.env.PATH, HOME: home, SHITRAT_GITHUB_VIA: "direct", SHITRAT_GITHUB_APP_ID: "123", SHITRAT_GITHUB_PRIVATE_KEY: privateKey, SHITRAT_GITHUB_CLIENT_ID: "test-client", SHITRAT_GITHUB_INSTALLATIONS_JSON: `{"${repo.split("/")[0]}":123}`, DELETE_BRANCH_TEST_AUDIT: audit, DELETE_BRANCH_TEST_SCENARIO: scenario, DELETE_BRANCH_TEST_REPO: repo, ...fixture },
       stdout: "pipe", stderr: "pipe",
     })
     const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])

@@ -63,6 +63,7 @@ const createPushRepo = async (): Promise<{ readonly dir: string; readonly baseSh
 
 const runCli = async (...args: string[]) => {
   const proc = Bun.spawn(["bun", "run", "src/cli.ts", ...args], {
+    env: { ...process.env, SHITRAT_GITHUB_VIA: "direct" },
     cwd: new URL("../", import.meta.url).pathname,
     stdout: "pipe",
     stderr: "pipe",

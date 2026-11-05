@@ -10,7 +10,7 @@ const signing = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateK
 const identity = JSON.stringify({ did: "did:web:fixture.example.invalid", signing })
 const fixture = path.join(import.meta.dir, "fixtures/cell-client.ts")
 const readOrEmpty = async (file: string) => readFile(file, "utf8").catch(() => "")
-type Seen = { path: string; search: string; authorization: string | null; auth: string | null; body: Buffer }
+type Seen = { method: string; path: string; search: string; authorization: string | null; auth: string | null; body: Buffer }
 type NonceRecord = { command: string; nonce: string | null }
 type ForwardRequest = { token: string; nonce: string }
 type GitChild = { args: string[]; nonceEnv: string | null; traceKeys: string[] }
@@ -60,7 +60,7 @@ const scenario = async (input: {
         expect(verify("sha256", Buffer.from(`${header}.${payload}`), { key: createPublicKey({ key: signing, format: "jwk" }), dsaEncoding: "ieee-p1363" }, Buffer.from(signature!, "base64url"))).toBe(true)
         expect(JSON.parse(Buffer.from(payload!, "base64url").toString())).toMatchObject({ aud: "did:web:cell.example.invalid", iss: "did:web:fixture.example.invalid" })
       }
-      seen.push({ path: url.pathname, search: url.search, authorization: request.headers.get("authorization"), auth: request.headers.get("x-sc-auth"), body: Buffer.from(await request.arrayBuffer()) })
+      seen.push({ method: request.method, path: url.pathname, search: url.search, authorization: request.headers.get("authorization"), auth: request.headers.get("x-sc-auth"), body: Buffer.from(await request.arrayBuffer()) })
       if (url.pathname === "/v1/describe") return Response.json({ name: "shitrat-github", kind: "github-app" }, { status: input.refusal ? 403 : 200 })
       if (input.fetchRefusal) return Response.json({ error: { what: "refused", why: "fixture-policy", next: "sc describe shitrat-github" } }, { status: 403 })
       if (input.redirect) return new Response(null, { status: 302, headers: { location: "https://unapproved.example.invalid/leak" } })
@@ -238,8 +238,8 @@ describe("GitHub cell route", () => {
     expect(output.headers["x-echo"]).toBe("[REDACTED]")
     expect(JSON.parse(output.body).headers["x-sc-forward-token"]).toBe("[REDACTED]")
   })
-  test("no opt-in uses direct auth, logs direct and never starts sc", async () => {
-    const result = await scenario({})
+  test("explicit direct uses direct auth, logs direct and never starts sc", async () => {
+    const result = await scenario({ via: "direct" })
     expect(result.exit).toBe(0)
     expect(JSON.parse(result.stdout).data.direct).toBe(true)
     expect(result.stderr).toContain('"path":"direct"')
@@ -247,6 +247,14 @@ describe("GitHub cell route", () => {
     expect(result.argv).toBe("")
     expect(result.seen).toEqual([])
     expect(result.direct).toContain("/app/installations/123/access_tokens")
+  })
+  test("unset route defaults to cell without loading direct credentials", async () => {
+    const result = await scenario({})
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout).data.cell).toBe(true)
+    expect(result.stderr.trim()).toBe('{"event":"github-route","path":"cell","reason":"requested"}')
+    expect(result.direct).toBe("")
+    expect(result.seen.map((request) => request.path)).toEqual(["/v1/describe", "/v1/u/api.github.com/repos/example/project"])
   })
   for (const mode of ["repo", "org"]) test(`${mode} success goes through signed client forwarding only`, async () => {
     const result = await scenario({ via: "cell", mode })
@@ -314,8 +322,16 @@ describe("GitHub cell route", () => {
     expect(result.seen.map((request) => request.path)).toEqual(["/v1/describe"])
     expect(result.argv).not.toContain("--listen")
   })
-  test("status CLI works without direct installation discovery", async () => {
-    const result = await scenario({ via: "cell", cli: true })
+  test("direct-mode status retains installation_id from the selected token", async () => {
+    const result = await scenario({ via: "direct", cli: true })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, result: { repo: "example/project", installation_id: 123 } })
+    expect(result.direct).toContain("/app/installations/123/access_tokens")
+    expect(result.argv).toBe("")
+    expect(result.seen).toEqual([])
+  })
+  for (const via of [undefined, "cell"]) test(`status CLI works without direct installation discovery (via=${via ?? "unset"})`, async () => {
+    const result = await scenario({ ...(via === undefined ? {} : { via }), cli: true })
     expect(result.exit).toBe(0)
     expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, result: { repo: "example/project" } })
     expect(result.direct).toBe("")
@@ -397,6 +413,78 @@ describe("GitHub cell route", () => {
     expect(JSON.parse(result.stdout).data.direct).toBe(true)
     expect(result.stderr).toContain('{"event":"github-route","path":"direct","reason":"cell-refused"}')
   })
+  for (const [mode, name] of [["fallback-write-timeout", "TimeoutError"], ["fallback-write-abort", "AbortError"], ["fallback-write-upstream", "Error"]] as const) test(`${mode} never replays an accepted write through direct`, async () => {
+    const result = await scenario({ fallback: "direct", mode, ...(mode === "fallback-write-upstream" ? { fetchRefusal: true } : {}) })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ directCalls: 0, error: { name } })
+    expect(result.seen).toHaveLength(1)
+    expect(result.seen[0]!.method).toBe("POST")
+    expect(result.seen[0]!.body.toString()).toBe('{"title":"fixture write"}')
+    expect(result.direct).toBe("")
+    expect(result.stderr).not.toContain('"path":"direct"')
+  })
+  for (const mode of ["fallback-configuration", "fallback-forward-start"]) test(`${mode} still permits explicit setup fallback`, async () => {
+    const result = await scenario({ fallback: "direct", mode, ...(mode === "fallback-forward-start" ? { forwardFailure: true } : {}) })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({ directCalls: 1 })
+    expect(result.seen).toEqual([])
+    expect(result.stderr).toContain('"path":"direct"')
+  })
+  test("a Git push failure after reaching the forward never replays through direct", async () => {
+    await scenario({ fallback: "direct", mode: "fallback-git-push", fetchRefusal: true, git: async (home, run) => {
+      const local = path.join(home, "local")
+      for (const args of [
+        ["init", "-b", "main", local],
+        ["-C", local, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture"],
+      ]) {
+        const proc = Bun.spawn(["git", ...args], { stdout: "ignore", stderr: "ignore" })
+        expect(await proc.exited).toBe(0)
+      }
+      const result = await run(["push", "https://github.com/example/project.git", "HEAD:refs/heads/main"])
+      expect(result.exit).toBe(0)
+      expect(JSON.parse(result.stdout)).toMatchObject({ directCalls: 0, error: { reason: "refused" } })
+      expect(result.seen).toHaveLength(1)
+      expect(result.seen[0]!.path).toBe("/v1/u/github.com/example/project.git/info/refs")
+      expect(new URLSearchParams(result.seen[0]!.search).get("service")).toBe("git-receive-pack")
+      expect(result.gitChildren).toHaveLength(1)
+      expect(result.gitChildren[0]!.args).toContain("push")
+      expect(result.direct).toBe("")
+      expect(result.stderr).not.toContain('"path":"direct"')
+      return result
+    } })
+  })
+  test("an untyped setup error preserves the original error and cannot fall back", async () => {
+    const result = await scenario({ fallback: "direct", mode: "fallback-untyped" })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({ directCalls: 0, originalPreserved: true, error: { name: "Error", message: "fixture unknown failure" } })
+    expect(result.seen).toEqual([])
+    expect(result.direct).toBe("")
+    expect(result.stderr).not.toContain('"path":"direct"')
+  })
+  test("missing command state rethrows the original setup error without falling back", async () => {
+    const result = await scenario({ fallback: "direct", mode: "fallback-missing-store" })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ directCalls: 0, originalPreserved: true, error: { reason: "configuration", message: "Cell route failed (configuration). fixture missing command state" } })
+    expect(result.seen).toEqual([])
+    expect(result.direct).toBe("")
+    expect(result.stderr).not.toContain('"path":"direct"')
+  })
+  for (const mode of ["fallback-unlisted-reason", "fallback-unsupported"]) test(`${mode} is outside the setup fallback allow-list`, async () => {
+    const result = await scenario({ fallback: "direct", mode })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ directCalls: 0, error: { reason: mode === "fallback-unlisted-reason" ? "future-setup-reason" : "unsupported" } })
+    expect(result.seen).toEqual([])
+    expect(result.direct).toBe("")
+    expect(result.stderr).not.toContain('"path":"direct"')
+  })
+  for (const mode of ["fallback-after-request", "fallback-app-after-request"]) test(`${mode} cannot authorize direct fallback`, async () => {
+    const result = await scenario({ fallback: "direct", mode })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ directCalls: 0, error: {} })
+    expect(result.seen).toHaveLength(1)
+    expect(result.direct).toBe("")
+    expect(result.stderr).not.toContain('"path":"direct"')
+  })
   test("no fallback after repository requests begin, even if permitted", async () => {
     const result = await scenario({ via: "cell", fallback: "direct", fetchRefusal: true })
     expect(result.exit).toBe(1)
@@ -427,10 +515,12 @@ describe("GitHub cell route", () => {
     expect(result.direct).toBe("")
     expect(result.seen).toHaveLength(1)
   })
-  test("invalid selectors fail closed", async () => {
-    const result = await scenario({ via: "cel" })
+  test("unknown selectors refuse as configuration before any authentication", async () => {
+    const result = await scenario({ via: "cel", cli: true })
     expect(result.exit).toBe(1)
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: { code: "GITHUB_CELL_ERROR", reason: "configuration" } })
     expect(result.direct).toBe("")
+    expect(result.argv).toBe("")
     expect(result.seen).toEqual([])
   })
   test("App-wide operations refuse without reading the direct key", async () => {

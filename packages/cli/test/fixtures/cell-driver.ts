@@ -1,12 +1,67 @@
+import { AsyncLocalStorage } from "node:async_hooks"
 import { Effect } from "effect"
 import { createRepoOctokit, listInstallations } from "../../src/github-app.js"
 import { createOrgOctokit } from "../../src/org-runners.js"
 import { runCellGit } from "../../src/git-push.js"
-import { cellFetch, GitHubCellError, withCellCommand } from "../../src/github-cell.js"
+import { cellFetch, GitHubCellError, requireDirectGitHub, selectGitHubPath, withCellCommand } from "../../src/github-cell.js"
 
 try {
   await withCellCommand(async () => {
-    if (process.argv[2] === "transport-errors") {
+    if (process.argv[2]?.startsWith("fallback-")) {
+      const mode = process.argv[2]
+      const originalFetch = globalThis.fetch
+      const originalGetStore = AsyncLocalStorage.prototype.getStore
+      let directCalls = 0
+      const untypedFailure = new Error("fixture unknown failure")
+      const missingStoreFailure = new GitHubCellError("configuration", "fixture missing command state")
+      const request = () => cellFetch("https://api.github.com/repos/example/project/issues", {
+        method: "POST", headers: { authorization: "Bearer {{secret:shitrat-github/example}}" }, body: JSON.stringify({ title: "fixture write" }),
+      })
+      if (mode === "fallback-write-timeout" || mode === "fallback-write-abort") {
+        globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+          const response = await originalFetch(input, init)
+          // The fake cell has already accepted the write. Losing its reply must
+          // never authorize a second attempt through direct authentication.
+          await response.arrayBuffer()
+          throw new DOMException("fixture transport diagnostic", mode === "fallback-write-timeout" ? "TimeoutError" : "AbortError")
+        }, { preconnect: originalFetch.preconnect })
+      }
+      try {
+        if (mode === "fallback-after-request" || mode === "fallback-app-after-request") await request()
+        if (mode === "fallback-app-after-request") {
+          requireDirectGitHub()
+          directCalls++
+        } else {
+          await selectGitHubPath({
+            cell: async () => {
+              if (mode === "fallback-missing-store") {
+                AsyncLocalStorage.prototype.getStore = () => undefined
+                throw missingStoreFailure
+              }
+              if (mode === "fallback-untyped") throw untypedFailure
+              if (mode === "fallback-unlisted-reason") throw Object.assign(new GitHubCellError("client"), { reason: "future-setup-reason" })
+              if (mode === "fallback-unsupported") throw new GitHubCellError("unsupported")
+              if (mode === "fallback-git-push") {
+                const result = await runCellGit({ args: JSON.parse(process.env.CELL_TEST_GIT_ARGS!), cwd: process.env.CELL_TEST_GIT_CWD!, placeholder: "{{secret:shitrat-github/example}}" })
+                return new Response(result.stdout)
+              }
+              if (mode === "fallback-configuration" || mode === "fallback-after-request") throw new GitHubCellError("configuration")
+              const response = await request()
+              if (!response.ok) throw new Error("fixture upstream failure")
+              return response
+            },
+            direct: async () => { directCalls++; return new Response("direct fixture") },
+          })
+        }
+        process.stdout.write(JSON.stringify({ directCalls }))
+      } catch (error) {
+        if (!(error instanceof Error)) throw error
+        process.stdout.write(JSON.stringify({ directCalls, ...(mode === "fallback-untyped" || mode === "fallback-missing-store" ? { originalPreserved: error === (mode === "fallback-missing-store" ? missingStoreFailure : untypedFailure) } : {}), error: { name: error.name, message: error.message, ...(error instanceof GitHubCellError ? { reason: error.reason } : {}) } }))
+      } finally {
+        globalThis.fetch = originalFetch
+        AsyncLocalStorage.prototype.getStore = originalGetStore
+      }
+    } else if (process.argv[2] === "transport-errors") {
       const errors = []
       for (const kind of ["AbortError", "TimeoutError"]) {
         try {

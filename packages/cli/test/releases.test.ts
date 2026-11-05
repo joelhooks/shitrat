@@ -15,7 +15,7 @@ const run = async (command: "tag" | "release", args: string[] = [], scenario = "
     await writeFile(path.join(home, "notes.md"), "Release notes\n")
     const argv = command === "tag" ? ["--name", tagInput.name, "--target", tagInput.target] : ["--tag", "v0.1.0"]
     const proc = Bun.spawn([process.execPath, "--preload", path.join(import.meta.dir, "fixtures/releases-preload.ts"), path.join(import.meta.dir, "../src/cli.ts"), command, "example/project", ...argv, ...args.map((arg) => arg === "NOTES_FILE" ? path.join(home, "notes.md") : arg)], {
-      env: { PATH: process.env.PATH, HOME: home, SHITRAT_GITHUB_APP_ID: "123", SHITRAT_GITHUB_PRIVATE_KEY: privateKey, SHITRAT_GITHUB_CLIENT_ID: "test-client", SHITRAT_GITHUB_INSTALLATIONS_JSON: '{"example":123}', RELEASE_TEST_AUDIT: audit, RELEASE_TEST_COMMAND: command, RELEASE_TEST_SCENARIO: scenario },
+      env: { PATH: process.env.PATH, HOME: home, SHITRAT_GITHUB_VIA: "direct", SHITRAT_GITHUB_APP_ID: "123", SHITRAT_GITHUB_PRIVATE_KEY: privateKey, SHITRAT_GITHUB_CLIENT_ID: "test-client", SHITRAT_GITHUB_INSTALLATIONS_JSON: '{"example":123}', RELEASE_TEST_AUDIT: audit, RELEASE_TEST_COMMAND: command, RELEASE_TEST_SCENARIO: scenario },
       stdout: "pipe", stderr: "pipe",
     })
     const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
