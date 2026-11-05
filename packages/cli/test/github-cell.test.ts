@@ -26,6 +26,7 @@ const scenario = async (input: {
   identityFile?: string
   cli?: boolean
   cliArgs?: string[]
+  runnerFailure?: { status: number; headers?: Record<string, string>; message: string }
   forwardFailure?: boolean
   unavailableClient?: boolean
   gitTracing?: boolean
@@ -89,6 +90,8 @@ const scenario = async (input: {
       const headers: Record<string, string> = page === 1 ? { link: `<https://api.github.com${apiPath}?per_page=100&page=2>; rel="next"` } : {}
       if (apiPath.endsWith("/check-runs")) return Response.json({ total_count: 2, check_runs: [{ id: page, name: `check-${page}`, status: "completed", conclusion: "success" }] }, { headers })
       if (apiPath.endsWith("/status")) return Response.json({ sha: "a".repeat(40), url: `https://api.github.com${apiPath}`, state: "success", total_count: 2, statuses: [{ context: `status-${page}`, state: "success" }] })
+      if (input.runnerFailure && apiPath.endsWith("/actions/runner-groups")) return Response.json({ total_count: 0, runner_groups: [] })
+      if (input.runnerFailure && apiPath.endsWith("/actions/runners")) return Response.json({ message: input.runnerFailure.message }, { status: input.runnerFailure.status, headers: input.runnerFailure.headers ?? {} })
       if (apiPath.endsWith("/actions/runners")) return Response.json({ total_count: 2, runners: [{ id: page, name: `runner-${page}`, os: "linux", status: "offline", busy: false, labels: [] }] }, { headers })
       if (apiPath === "/installation/repositories") return Response.json({ total_count: 2, repositories: [{ full_name: `example/project-${page}`, owner: { login: "example" } }] }, { headers })
       if (apiPath.endsWith("/actions/runs")) {
@@ -392,6 +395,31 @@ describe("GitHub cell route", () => {
     expect(result.direct).toBe("")
     expect(result.seen).toHaveLength(3)
     if (!process.env.SHITRAT_TEST_SC_BIN) expect(result.argv.trim().split("\n").map((line) => JSON.parse(line)).filter((args: string[]) => args.includes("forward") && !args.includes("--capabilities"))).toHaveLength(1)
+  })
+  for (const runnerFailure of [
+    { status: 403, headers: { "x-ratelimit-remaining": "0" }, message: "fixture-response" },
+    { status: 403, headers: { "retry-after": "30" }, message: "fixture-response" },
+    { status: 403, message: "You have exceeded a secondary rate limit: fixture-response" },
+    { status: 429, message: "fixture-response" },
+  ]) test(`runners CLI reports rate limits without permission advice (${JSON.stringify(runnerFailure)})`, async () => {
+    const result = await scenario({ cli: true, cliArgs: ["runners", "--org", "example"], runnerFailure })
+    expect(result.exit).toBe(1)
+    expect(JSON.parse(result.stdout)).toEqual({ ok: false, command: "shitrat runners", result: null,
+      error: { code: "ORG_RUNNERS_RATE_LIMITED", message: `GET /orgs/{org}/actions/runners: HTTP ${runnerFailure.status}; rate limited; retry later.` },
+      fix: "Retry later after the GitHub rate limit clears.", next_actions: [] })
+    expect(result.stdout).not.toContain("requires")
+    expect(result.stdout).not.toContain("fixture-response")
+    expect(result.direct).toBe("")
+    const reads = result.seen.filter((request) => request.path.startsWith("/v1/u/"))
+    expect(reads).toHaveLength(2)
+    expect(reads.every((request) => request.method === "GET")).toBe(true)
+  })
+  test("runners CLI keeps the permission hint for a plain 403", async () => {
+    const result = await scenario({ cli: true, cliArgs: ["runners", "--org", "example"], runnerFailure: { status: 403, message: "fixture-response" } })
+    expect(result.exit).toBe(1)
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: { code: "ORG_RUNNERS_FAILED", message: "GET /orgs/{org}/actions/runners: HTTP 403; requires organization_self_hosted_runners: read. Stop; do not change app permissions." } })
+    expect(result.stdout).not.toContain("fixture-response")
+    expect(result.direct).toBe("")
   })
   test("runner-jobs CLI defaults to the cell, paginates and keeps one shared forward", async () => {
     const result = await scenario({ cli: true, cliArgs: ["runner-jobs", "--org", "example"] })
