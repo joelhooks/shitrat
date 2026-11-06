@@ -61,9 +61,10 @@ const suiteRun = (suite: number, id: number, name: string, status: string, concl
   check_suite: { id: suite },
 })
 
-const headRun = (id: number, workflow: number, suite: number, status: string, createdAt: string) => ({
+const headRun = (id: number, workflow: number, suite: number, status: string, createdAt: string, event = "pull_request") => ({
   id,
   workflow_id: workflow,
+  event,
   check_suite_id: suite,
   status,
   created_at: createdAt,
@@ -194,6 +195,19 @@ describe("checks", () => {
     const result = await readChecks(gh.octokit, ref, SHA)
     expect(result.summary.verdict).toBe("failure")
     expect(result.superseded).toEqual({ read: true, check_runs: [] })
+  })
+
+  test("a newer run of the same workflow for another event is not a replacement", async () => {
+    const gh = github({
+      ...checksRoutes([...cancelledLight, ...greenFull]),
+      ...workflowRunsRoute([
+        headRun(100, 10, 1, "completed", "2026-01-01T10:00:00Z", "merge_group"),
+        headRun(101, 10, 2, "completed", "2026-01-01T10:01:00Z", "pull_request"),
+      ]),
+    })
+    const result = await readChecks(gh.octokit, ref, SHA)
+    expect(result.superseded).toEqual({ read: true, check_runs: [] })
+    expect(result.summary.verdict).toBe("failure")
   })
 
   test("without Actions: read every run counts, and the reply says the replaced runs could not be read", async () => {

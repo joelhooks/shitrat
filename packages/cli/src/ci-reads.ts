@@ -94,6 +94,7 @@ export type CiVerdict = "success" | "failure" | "pending" | "none"
 export interface WorkflowRunRef {
   id: number
   workflow_id: number
+  event: string
   check_suite_id: number | null
   status: string | null
   created_at: string
@@ -108,11 +109,15 @@ const runOrder = (left: WorkflowRunRef, right: WorkflowRunRef): number =>
   Date.parse(left.created_at) - Date.parse(right.created_at) || left.id - right.id
 
 // Each workflow run on a head is its own check suite, so a cancelled earlier run of a workflow keeps
-// its red rows beside the newer run's. Only the newest completed run of each workflow counts; runs
-// older than it are superseded. A newer run still going is kept, so the verdict reads pending.
+// its red rows beside the newer run's. Only the newest completed run of each workflow and event counts;
+// runs older than it are superseded. A run for another event (a merge queue run of the same workflow)
+// answers a different question, so it never replaces one. A newer run still going is kept, so the verdict reads pending.
 export const supersededCheckSuites = (runs: readonly WorkflowRunRef[]): Map<number, Supersession> => {
-  const byWorkflow = new Map<number, WorkflowRunRef[]>()
-  for (const run of runs) byWorkflow.set(run.workflow_id, [...(byWorkflow.get(run.workflow_id) ?? []), run])
+  const byWorkflow = new Map<string, WorkflowRunRef[]>()
+  for (const run of runs) {
+    const key = `${run.workflow_id}\u0000${run.event}`
+    byWorkflow.set(key, [...(byWorkflow.get(key) ?? []), run])
+  }
   const superseded = new Map<number, Supersession>()
   for (const workflowRuns of byWorkflow.values()) {
     const newest = workflowRuns
@@ -147,6 +152,7 @@ const readSupersession = async (
         runs.map((run) => ({
           id: run.id,
           workflow_id: run.workflow_id,
+          event: run.event,
           check_suite_id: run.check_suite_id ?? null,
           status: run.status ?? null,
           created_at: run.created_at,
