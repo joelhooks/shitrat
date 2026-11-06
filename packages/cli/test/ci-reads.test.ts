@@ -56,6 +56,37 @@ const checksRoutes = (runs: ReturnType<typeof checkRun>[], statuses: { context: 
 
 const forbidden: Reply = { status: 403, body: { message: "Resource not accessible by integration" } }
 
+const suiteRun = (suite: number, id: number, name: string, status: string, conclusion: string | null) => ({
+  ...checkRun(id, name, status, conclusion),
+  check_suite: { id: suite },
+})
+
+const headRun = (id: number, workflow: number, suite: number, status: string, createdAt: string) => ({
+  id,
+  workflow_id: workflow,
+  check_suite_id: suite,
+  status,
+  created_at: createdAt,
+})
+
+const workflowRunsRoute = (runs: ReturnType<typeof headRun>[] | Reply): Record<string, Reply> => ({
+  [`GET /repos/o/r/actions/runs?head_sha=${SHA}&per_page=100`]: Array.isArray(runs) ? { body: { total_count: runs.length, workflow_runs: runs } } : runs,
+})
+
+// A label that switches CI to its full suite starts a second run of the same workflow on the same head,
+// and concurrency cancels the first. The cancelled run's rows stay on the commit beside the green ones.
+const cancelledLight = [
+  suiteRun(1, 1, "lint", "completed", "cancelled"),
+  suiteRun(1, 2, "unit", "completed", "cancelled"),
+  suiteRun(1, 3, "checks", "completed", "failure"),
+]
+const greenFull = [
+  suiteRun(2, 4, "lint", "completed", "success"),
+  suiteRun(2, 5, "unit", "completed", "success"),
+  suiteRun(2, 6, "integration", "completed", "success"),
+  suiteRun(2, 7, "checks", "completed", "success"),
+]
+
 describe("checks", () => {
   test("reads check runs and the combined status and summarizes them", async () => {
     const gh = github(
@@ -103,6 +134,74 @@ describe("checks", () => {
     expect(result.check_runs.at(-1)?.name).toBe("job-101")
     expect(result.combined_status.total).toBe(101)
     expect(result.summary).toMatchObject({ verdict: "failure", total: 202, failing: ["ctx-101"] })
+  })
+
+  test("a cancelled run that a newer completed run of the same workflow replaced does not count", async () => {
+    const gh = github({
+      ...checksRoutes([...cancelledLight, ...greenFull, suiteRun(3, 8, "review", "completed", "failure")]),
+      ...workflowRunsRoute([
+        headRun(100, 10, 1, "completed", "2026-01-01T10:00:00Z"),
+        headRun(101, 10, 2, "completed", "2026-01-01T10:01:00Z"),
+        headRun(102, 20, 3, "completed", "2026-01-01T10:00:00Z"),
+      ]),
+    })
+    const result = await readChecks(gh.octokit, ref, SHA)
+    expect(result.check_runs.map((run) => run.id)).toEqual([4, 5, 6, 7, 8])
+    expect(result.superseded).toEqual({
+      read: true,
+      check_runs: [
+        { id: 1, name: "lint", conclusion: "cancelled", workflow_run_id: 100, superseded_by: 101 },
+        { id: 2, name: "unit", conclusion: "cancelled", workflow_run_id: 100, superseded_by: 101 },
+        { id: 3, name: "checks", conclusion: "failure", workflow_run_id: 100, superseded_by: 101 },
+      ],
+    })
+    expect(result.summary).toMatchObject({ verdict: "failure", failing: ["review"] })
+  })
+
+  test("with the cancelled run replaced and nothing else failing, the head is green", async () => {
+    const gh = github({
+      ...checksRoutes([...cancelledLight, ...greenFull]),
+      ...workflowRunsRoute([headRun(100, 10, 1, "completed", "2026-01-01T10:00:00Z"), headRun(101, 10, 2, "completed", "2026-01-01T10:01:00Z")]),
+    })
+    expect((await readChecks(gh.octokit, ref, SHA)).summary).toMatchObject({ verdict: "success", failing: [], pending: [] })
+  })
+
+  test("a cancelled run with no newer completed run still fails the head", async () => {
+    const gh = github({
+      ...checksRoutes(cancelledLight),
+      ...workflowRunsRoute([headRun(100, 10, 1, "completed", "2026-01-01T10:00:00Z")]),
+    })
+    const result = await readChecks(gh.octokit, ref, SHA)
+    expect(result.superseded).toEqual({ read: true, check_runs: [] })
+    expect(result.summary).toMatchObject({ verdict: "failure", failing: ["lint", "unit", "checks"] })
+  })
+
+  test("a newer run still going replaces nothing: the older result stays and its jobs read pending", async () => {
+    const gh = github({
+      ...checksRoutes([...cancelledLight, suiteRun(2, 4, "lint", "in_progress", null)]),
+      ...workflowRunsRoute([headRun(100, 10, 1, "completed", "2026-01-01T10:00:00Z"), headRun(101, 10, 2, "in_progress", "2026-01-01T10:01:00Z")]),
+    })
+    const result = await readChecks(gh.octokit, ref, SHA)
+    expect(result.superseded).toEqual({ read: true, check_runs: [] })
+    expect(result.summary).toMatchObject({ failing: ["lint", "unit", "checks"], pending: ["lint"] })
+  })
+
+  test("an older completed run of a different workflow is not replaced", async () => {
+    const gh = github({
+      ...checksRoutes([...cancelledLight, ...greenFull]),
+      ...workflowRunsRoute([headRun(100, 10, 1, "completed", "2026-01-01T10:00:00Z"), headRun(101, 11, 2, "completed", "2026-01-01T10:01:00Z")]),
+    })
+    const result = await readChecks(gh.octokit, ref, SHA)
+    expect(result.summary.verdict).toBe("failure")
+    expect(result.superseded).toEqual({ read: true, check_runs: [] })
+  })
+
+  test("without Actions: read every run counts, and the reply says the replaced runs could not be read", async () => {
+    const gh = github({ ...checksRoutes([...cancelledLight, ...greenFull]), ...workflowRunsRoute(forbidden) })
+    const result = await readChecks(gh.octokit, ref, SHA)
+    expect(result.check_runs).toHaveLength(7)
+    expect(result.summary.verdict).toBe("failure")
+    expect(result.superseded).toMatchObject({ read: false, reason: expect.stringContaining("Actions: read") })
   })
 
   test("a commit with nothing reported has verdict none, not GitHub's empty pending", async () => {
@@ -185,6 +284,17 @@ describe("pr-status", () => {
       },
     })
     expect(gh.requests[0]).toBe("GET /repos/o/r/pulls/7")
+  })
+
+  test("a head whose cancelled run was replaced by a green one reads success, with the replaced rows counted", async () => {
+    const gh = github({
+      "GET /repos/o/r/pulls/7": { body: pull },
+      ...checksRoutes([...cancelledLight, ...greenFull]),
+      ...workflowRunsRoute([headRun(100, 10, 1, "completed", "2026-01-01T10:00:00Z"), headRun(101, 10, 2, "completed", "2026-01-01T10:01:00Z")]),
+    })
+    expect(await readPullRequestStatus(gh.octokit, ref, 7)).toMatchObject({
+      checks: { verdict: "success", failing: [], failing_runs: [], superseded_check_runs: 3 },
+    })
   })
 
   test("reports mergeable null while GitHub is still computing it", async () => {
