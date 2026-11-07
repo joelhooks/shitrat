@@ -27,8 +27,9 @@ try {
         }, { preconnect: originalFetch.preconnect })
       }
       try {
-        if (mode === "fallback-after-request" || mode === "fallback-app-after-request") await request()
-        if (mode === "fallback-app-after-request") {
+        if (mode === "fallback-app-after-direct-selection") requireDirectGitHub()
+        if (mode === "fallback-after-request" || mode === "fallback-app-after-request" || mode === "fallback-app-after-direct-selection") await request()
+        if (mode === "fallback-app-after-request" || mode === "fallback-app-after-direct-selection") {
           requireDirectGitHub()
           directCalls++
         } else {
@@ -47,6 +48,7 @@ try {
               }
               if (mode === "fallback-configuration" || mode === "fallback-after-request") throw new GitHubCellError("configuration")
               const response = await request()
+              if (mode === "fallback-client-after-request") throw new GitHubCellError("client")
               if (!response.ok) throw new Error("fixture upstream failure")
               return response
             },

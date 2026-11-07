@@ -27,6 +27,7 @@ const identity: unknown = JSON.parse(process.env.SC_IDENTITY_JSON ?? "null")
 if (typeof identity !== "object" || identity === null || !("did" in identity) || identity.did !== "did:web:fixture.example.invalid" || !("signing" in identity) || typeof identity.signing !== "object" || identity.signing === null || !("d" in identity.signing)) process.exit(9)
 const headers = { "x-sc-auth": "fixture-caller-token" }
 if (args.includes("describe")) {
+  if (process.env.CELL_TEST_DESCRIBE_HANG === "1") await new Promise(() => { setInterval(() => {}, 60_000) })
   const response = await fetch(`${origin}/v1/describe?name=shitrat-github`, { headers, redirect: "manual" })
   process.exit(response.ok ? 0 : 1)
 }

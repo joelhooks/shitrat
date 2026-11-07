@@ -1,4 +1,5 @@
 import path from "node:path"
+import { gitEnvironment } from "./child-environment.js"
 import { GitHubCellError, isCellPlaceholder, withCellForward } from "./github-cell.js"
 
 export const SHITRAT_GIT_AUTHOR = {
@@ -40,7 +41,6 @@ interface GitRunOptions {
   readonly cwd: string
   readonly env?: Record<string, string>
   readonly sensitiveValues?: readonly string[]
-  readonly cell?: boolean
 }
 
 const redact = (text: string, sensitiveValues: readonly string[]): string =>
@@ -53,15 +53,7 @@ const runGitResult = async (
   args: readonly string[],
   options: GitRunOptions,
 ): Promise<GitResult> => {
-  const env = { ...process.env, ...options.env }
-  if (options.cell) {
-    for (const key of ["SC_IDENTITY_JSON", "SC_PASS_FILE", "SHITRAT_GITHUB_PRIVATE_KEY", "SHITRAT_PUSH_TOKEN", "SHITRAT_GITHUB_TOKEN", "SC_FORWARD_NONCE"]) delete env[key]
-    // Custom headers are not covered by Git's credential redaction. Disable
-    // inherited tracing, including file-based trace destinations and trace2.
-    for (const key of Object.keys(env)) {
-      if (key.startsWith("GIT_TRACE") || key === "GIT_CURL_VERBOSE" || key === "GIT_REDACT_COOKIES") delete env[key]
-    }
-  }
+  const env = gitEnvironment(options.env)
   const proc = Bun.spawn(["git", ...args], {
     cwd: options.cwd,
     env,
@@ -170,7 +162,7 @@ const runAuthenticatedGit = async (
       host: "github.com",
       run: async (origin, nonce) => {
         const invocation = buildCellGitInvocation({ args, placeholder: installationToken, origin, nonce })
-        const result = await runGitResult(invocation.args, { cwd, env: invocation.env, cell: true, sensitiveValues: [nonce] })
+        const result = await runGitResult(invocation.args, { cwd, env: invocation.env, sensitiveValues: [nonce] })
         if (result.exitCode !== 0) throw new GitHubCellError("refused")
         return result
       },

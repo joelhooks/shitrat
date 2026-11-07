@@ -1,4 +1,6 @@
 import { Effect } from "effect"
+import { secretsExecutable } from "./executable-trust.js"
+import { leaseEnvironment } from "./child-environment.js"
 
 export class MissingSecretError extends Error {
   readonly code = "MISSING_SECRET"
@@ -16,9 +18,10 @@ const readEnv = (secretName: string): string | undefined => {
 }
 
 const leaseWithAgentSecrets = (secretName: string): string | undefined => {
-  const proc = Bun.spawnSync(["secrets", "lease", secretName], {
-    stdout: "pipe",
-    stderr: "pipe",
+  let bin: string
+  try { bin = secretsExecutable() } catch { return undefined }
+  const proc = Bun.spawnSync([bin, "lease", secretName], {
+    env: leaseEnvironment(), stdout: "pipe", stderr: "pipe",
   })
 
   if (proc.exitCode !== 0) return undefined
@@ -47,8 +50,11 @@ export class SecretWriteError extends Error {
 // The value goes in on stdin, never argv, and is read back from the store
 // (not the env override) to prove the write landed.
 export const writeAgentSecret = (secretName: string, value: string): void => {
+  let bin: string
+  try { bin = secretsExecutable() } catch { throw new SecretWriteError(secretName, "untrusted secrets executable") }
   const run = (verb: "update" | "add") =>
-    Bun.spawnSync(["secrets", verb, secretName], {
+    Bun.spawnSync([bin, verb, secretName], {
+      env: leaseEnvironment(),
       stdin: new TextEncoder().encode(value),
       stdout: "pipe",
       stderr: "pipe",

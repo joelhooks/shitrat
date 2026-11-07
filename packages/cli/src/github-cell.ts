@@ -3,12 +3,14 @@ import { AsyncLocalStorage } from "node:async_hooks"
 import { constants } from "node:fs"
 import { open, readFile } from "node:fs/promises"
 import { homedir } from "node:os"
-import { isAbsolute, join } from "node:path"
+import { join } from "node:path"
+import { trustedExecutable, secretsExecutable } from "./executable-trust.js"
+import { leaseEnvironment } from "./child-environment.js"
 
 export class GitHubCellError extends Error {
   readonly code = "GITHUB_CELL_ERROR"
   constructor(readonly reason: "configuration" | "client" | "refused" | "unsupported", detail?: string) {
-    super(detail ? `Cell route failed (${reason}). ${detail}` : `Cell route failed (${reason}). Check SC_URL, SC_AUDIENCE, the sc executable, caller identity/pass and SHITRAT_CELL_CALLER_DOCUMENT_FILE. No automatic direct-key fallback; SHITRAT_GITHUB_CELL_FALLBACK=direct explicitly permits setup fallback.`)
+    super(detail ? `Cell route failed (${reason}). ${detail}` : `Cell route failed (${reason}). Check SC_URL, SC_AUDIENCE, the sc executable, caller identity/pass and SHITRAT_CELL_CALLER_DOCUMENT_FILE. ${process.env.SHITRAT_GITHUB_VIA === undefined || process.env.SHITRAT_GITHUB_VIA === "auto" ? "Auto mode falls back to direct on setup failures only." : "No automatic direct-key fallback; SHITRAT_GITHUB_CELL_FALLBACK=direct explicitly permits setup fallback."}`)
   }
 }
 
@@ -87,6 +89,7 @@ export const deriveCallerDocument = (identityJson: string): unknown => {
   const kid = identity.kid ?? "#atproto"
   if (typeof identity.did !== "string" || typeof kid !== "string" || !kid.startsWith("#")) throw new GitHubCellError("configuration")
   const id = `${identity.did}${kid}`
+  // This derived document is a consistency self-check, not an independent pin.
   // Project public fields explicitly. Never spread a private JWK into this document.
   const publicKeyJwk = { kty: signing.kty, crv: signing.crv, x: signing.x, y: signing.y }
   const document = { id: identity.did, verificationMethod: [{ id, controller: identity.did, publicKeyJwk }], authentication: [id] }
@@ -106,8 +109,8 @@ const autoClientConfiguration = async (): Promise<ClientConfiguration> => {
     }
     const url = process.env.SC_URL ?? local.url
     const audience = process.env.SC_AUDIENCE ?? local.audience
-    const bin = process.env.SHITRAT_SC_BIN ?? local.scBin ?? "sc"
-    if (typeof url !== "string" || !url || typeof audience !== "string" || !audience || typeof bin !== "string" || !isAbsolute(bin)) throw new GitHubCellError("configuration")
+    if (typeof url !== "string" || !url || typeof audience !== "string" || !audience) throw new GitHubCellError("configuration")
+    const bin = trustedExecutable(process.env.SHITRAT_SC_BIN ?? local.scBin)
     const env = clientEnvironment()
     const file = process.env.SHITRAT_CELL_IDENTITY_FILE
     if (file && process.env.SC_IDENTITY_JSON) throw new GitHubCellError("configuration")
@@ -115,15 +118,24 @@ const autoClientConfiguration = async (): Promise<ClientConfiguration> => {
     if (!identity) {
       const name = process.env.RATKING_NAME
       if (!name || !/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_.-]+$/.test(name)) throw new GitHubCellError("configuration")
-      const proc = Bun.spawn(["secrets", "lease", `rat_king_fleet_agent_${name.replaceAll("/", ".")}_identity`, "--client-id", "shitrat-cell", "--ttl", "5m"], {
-        env, stdin: "ignore", stdout: "pipe", stderr: "ignore",
+      const secretsBin = secretsExecutable(local.secretsBin)
+      const proc = Bun.spawn([secretsBin, "lease", `rat_king_fleet_agent_${name.replaceAll("/", ".")}_identity`, "--client-id", "shitrat-cell", "--ttl", "5m"], {
+        env: leaseEnvironment(), detached: true, stdin: "ignore", stdout: "pipe", stderr: "ignore",
       })
-      const timer = setTimeout(() => proc.kill("SIGKILL"), 10_000)
+      let timer: ReturnType<typeof setTimeout> | undefined
       try {
-        const [value, exit] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
+        const [value, exit] = await Promise.race([
+          Promise.all([new Response(proc.stdout).text(), proc.exited]),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new GitHubCellError("configuration")), 10_000) }),
+        ])
         if (exit !== 0 || !value.trim()) throw new GitHubCellError("configuration")
         identity = value.trim()
-      } finally { clearTimeout(timer) }
+      } finally {
+        clearTimeout(timer)
+        // A grandchild may outlive the lease executable while holding stdout.
+        // Kill only this detached, owned process group; never wait on that pipe.
+        try { process.kill(-proc.pid, "SIGKILL") } catch { try { proc.kill("SIGKILL") } catch { /* Already exited. */ } }
+      }
     }
     const document = process.env.SHITRAT_CELL_CALLER_DOCUMENT_FILE
     verifyCallerDocument(identity, document ? JSON.parse(await readFile(document, "utf8")) : deriveCallerDocument(identity))
@@ -178,7 +190,7 @@ export const prepareCell = async (owner: string): Promise<void> => {
   const args = [...config.args, "describe", "shitrat-github"]
   try {
     const proc = Bun.spawn(args, { env: config.env, stdin: "ignore", stdout: "ignore", stderr: "ignore" })
-    const timer = setTimeout(() => proc.kill("SIGKILL"), 65_000)
+    const timer = setTimeout(() => proc.kill("SIGKILL"), autoRoute() ? 8_000 : 65_000)
     const exit = await proc.exited.finally(() => clearTimeout(timer))
     if (exit !== 0) throw new GitHubCellError(exit === 1 ? "refused" : "client")
   } catch (error) {
@@ -191,40 +203,56 @@ export const selectGitHubPath = async <T>(input: {
   readonly direct: () => Promise<T>
 }): Promise<T> => withCellCommand(async () => {
   if (!githubViaCell()) {
-    logGitHubPath("direct", "selected")
+    decideGitHubPath("direct", "selected")
     return input.direct()
   }
-  logGitHubPath("cell", "requested")
-  // Explicit cell keeps its fail-closed compatibility gate. Auto permits
-  // bounded configuration fallback here, still before any forwarded request.
-  if (!autoRoute()) await requireForwardNonceSupport()
+  // Explicit cell keeps its fail-closed compatibility gate outside fallback.
+  if (!autoRoute()) {
+    try { await requireForwardNonceSupport() } catch (error) {
+      decideGitHubPath("cell", "requested")
+      throw error
+    }
+  }
   try {
     if (autoRoute()) {
       await clientConfiguration()
       await requireForwardNonceSupport()
     }
-    return await input.cell()
+    const result = await input.cell()
+    decideGitHubPath("cell", "requested")
+    return result
   } catch (error) {
     // Fallback is legal only for bounded setup failures before *any* forwarded
     // operation in this command. Never replay an uncertain write over direct.
     if (!setupFallbackEnabled() ||
       commandForwards.getStore()?.phase !== "setup" ||
-      !(error instanceof GitHubCellError) || !setupFallbackReasons.has(error.reason)) throw error
-    logGitHubPath("direct", `cell-${error.reason}`)
+      !(error instanceof GitHubCellError) || !setupFallbackReasons.has(error.reason)) {
+      decideGitHubPath("cell", "requested")
+      throw error
+    }
+    decideGitHubPath("direct", `cell-${error.reason}`)
     return input.direct()
   }
 })
 
+const decideGitHubPath = (path: "cell" | "direct", reason: string): void => {
+  const command = commandForwards.getStore()
+  if (command) command.route = path
+  logGitHubPath(path, reason)
+}
+
 export const requireDirectGitHub = (): void => {
+  const command = commandForwards.getStore()
+  if (command?.route === "direct" && command.phase === "setup") return
   if (!githubViaCell()) {
-    logGitHubPath("direct", "selected")
+    decideGitHubPath("direct", autoRoute() ? "app-operation" : "selected")
     return
   }
   if (!setupFallbackEnabled() || commandForwards.getStore()?.phase !== "setup") {
-    logGitHubPath("cell", "unsupported-app-operation")
+    decideGitHubPath("cell", "unsupported-app-operation")
     throw new GitHubCellError("unsupported")
   }
-  logGitHubPath("direct", "cell-unsupported-app-operation")
+  decideGitHubPath("direct", "app-operation")
 }
 
 const availablePort = async (): Promise<number> => {
@@ -245,7 +273,7 @@ type CellHost = "api.github.com" | "github.com"
 type CellForward = { readonly origin: string; readonly proc: Bun.Subprocess; readonly stop: () => Promise<void> }
 type CachedForward = Promise<CellForward> | GitHubCellError
 // Monotonic fallback boundary: setup -> requested. It never resets in a run.
-type CellCommand = { readonly nonce: string; readonly forwards: Map<CellHost, CachedForward>; capability?: Promise<void>; configuration?: Promise<ClientConfiguration>; phase: "setup" | "requested" }
+type CellCommand = { readonly nonce: string; readonly forwards: Map<CellHost, CachedForward>; capability?: Promise<void>; configuration?: Promise<ClientConfiguration>; route?: "cell" | "direct"; phase: "setup" | "requested" }
 const commandForwards = new AsyncLocalStorage<CellCommand>()
 
 const probeForwardNonceSupport = async (): Promise<void> => {

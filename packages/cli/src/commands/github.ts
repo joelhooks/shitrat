@@ -32,6 +32,7 @@ import {
 } from "../public-push-guard.js"
 import { attestPushedSha, withAttest } from "../attest.js"
 import { GitHubCellError, isCellPlaceholder } from "../github-cell.js"
+import { gitEnvironment } from "../child-environment.js"
 import { CiReadError, isFailingRun, readChecks, readJobLog, readPullRequestStatus, rerunWorkflowRun } from "../ci-reads.js"
 import { labelIssue, setCommitStatus } from "../labels-statuses.js"
 import { createAnnotatedTag, createGitHubRelease, GitHubReleaseError } from "../github-releases.js"
@@ -626,7 +627,7 @@ const runGitDetailed = async (
 ): Promise<{ readonly stdout: string; readonly stderr: string }> => {
   const proc = Bun.spawn(["git", ...args], {
     cwd: options.cwd,
-    env: { ...process.env, ...options.env },
+    env: gitEnvironment(options.env),
     stdout: "pipe",
     stderr: "pipe",
   })
