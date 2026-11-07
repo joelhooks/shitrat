@@ -800,6 +800,8 @@ describe("GitHub cell route", () => {
       [`/v1/u/api.github.com/repos/example/project/commits/${sha}/check-runs`, "2"],
       [`/v1/u/api.github.com/repos/example/project/commits/${sha}/status`, "1"],
       [`/v1/u/api.github.com/repos/example/project/commits/${sha}/status`, "2"],
+      ["/v1/u/api.github.com/repos/example/project/actions/runs", "1"],
+      ["/v1/u/api.github.com/repos/example/project/actions/runs", "2"],
     ])
     expect(result.direct).toBe("")
     expect(calls.every((request) => request.authorization === "Bearer {{secret:shitrat-github/example}}")).toBe(true)
