@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks"
 import { constants } from "node:fs"
 import { open, readFile } from "node:fs/promises"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { isAbsolute, join } from "node:path"
 
 export class GitHubCellError extends Error {
   readonly code = "GITHUB_CELL_ERROR"
@@ -28,7 +28,11 @@ export const githubViaCell = (): boolean => {
   if (via !== undefined && via !== "auto" && via !== "direct" && via !== "cell") throw new GitHubCellError("configuration")
   const fallback = process.env.SHITRAT_GITHUB_CELL_FALLBACK
   if (fallback !== undefined && fallback !== "direct") throw new GitHubCellError("configuration")
-  return autoRoute() ? !!process.env.RATKING_NAME && process.env.RATKING_NAME !== "off" : via !== "direct"
+  // An explicit identity plus URL expresses cell intent even outside Rat King.
+  // RATKING_NAME=off is an explicit auto-mode opt-out, including that case.
+  return autoRoute()
+    ? process.env.RATKING_NAME !== "off" && (!!process.env.RATKING_NAME || !!(process.env.SC_URL && (process.env.SC_IDENTITY_JSON || process.env.SHITRAT_CELL_IDENTITY_FILE)))
+    : via !== "direct"
 }
 
 const clientEnvironment = (): NodeJS.ProcessEnv => {
@@ -42,11 +46,15 @@ const objectValue = (value: unknown): Record<string, unknown> => {
   return Object.fromEntries(Object.entries(value))
 }
 
+export const verifyProtectedFile = (stat: { isFile(): boolean; mode: number; uid: number }): void => {
+  if (!stat.isFile() || (stat.mode & 0o777) !== 0o600 || stat.uid !== process.getuid?.()) throw new GitHubCellError("configuration")
+}
+
 const protectedIdentity = async (file: string): Promise<string> => {
   const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
     const stat = await handle.stat()
-    if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) throw new GitHubCellError("configuration")
+    verifyProtectedFile(stat)
     return await handle.readFile("utf8")
   } finally {
     await handle.close()
@@ -77,8 +85,8 @@ export const deriveCallerDocument = (identityJson: string): unknown => {
   const identity = objectValue(JSON.parse(identityJson))
   const signing = objectValue(identity.signing)
   const kid = identity.kid ?? "#atproto"
-  if (typeof identity.did !== "string" || typeof kid !== "string") throw new GitHubCellError("configuration")
-  const id = kid.startsWith("#") ? `${identity.did}${kid}` : kid
+  if (typeof identity.did !== "string" || typeof kid !== "string" || !kid.startsWith("#")) throw new GitHubCellError("configuration")
+  const id = `${identity.did}${kid}`
   // Project public fields explicitly. Never spread a private JWK into this document.
   const publicKeyJwk = { kty: signing.kty, crv: signing.crv, x: signing.x, y: signing.y }
   const document = { id: identity.did, verificationMethod: [{ id, controller: identity.did, publicKeyJwk }], authentication: [id] }
@@ -92,14 +100,14 @@ const autoClientConfiguration = async (): Promise<ClientConfiguration> => {
   try {
     let local: Record<string, unknown> = {}
     try {
-      local = objectValue(JSON.parse(await readFile(process.env.SHITRAT_CELL_CONFIG ?? join(homedir(), ".config/shitrat/cell.json"), "utf8")))
+      local = objectValue(JSON.parse(await protectedIdentity(process.env.SHITRAT_CELL_CONFIG ?? join(homedir(), ".config/shitrat/cell.json"))))
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error
     }
     const url = process.env.SC_URL ?? local.url
     const audience = process.env.SC_AUDIENCE ?? local.audience
     const bin = process.env.SHITRAT_SC_BIN ?? local.scBin ?? "sc"
-    if (typeof url !== "string" || !url || typeof audience !== "string" || !audience || typeof bin !== "string" || !bin) throw new GitHubCellError("configuration")
+    if (typeof url !== "string" || !url || typeof audience !== "string" || !audience || typeof bin !== "string" || !isAbsolute(bin)) throw new GitHubCellError("configuration")
     const env = clientEnvironment()
     const file = process.env.SHITRAT_CELL_IDENTITY_FILE
     if (file && process.env.SC_IDENTITY_JSON) throw new GitHubCellError("configuration")

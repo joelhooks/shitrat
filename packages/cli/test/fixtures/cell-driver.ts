@@ -101,6 +101,11 @@ try {
         }
       }
       process.stdout.write(JSON.stringify({ errors }))
+    } else if (process.argv[2] === "auto-push") {
+      // Same route selection and authenticated transport used by pushCmd.
+      const { token } = await Effect.runPromise(createRepoOctokit({ owner: "example", repo: "project", fullName: "example/project" }))
+      const result = await runCellGit({ args: JSON.parse(process.env.CELL_TEST_GIT_ARGS!), cwd: process.env.CELL_TEST_GIT_CWD!, placeholder: token.token })
+      process.stdout.write(JSON.stringify(result))
     } else if (process.argv[2] === "git") {
       await cellFetch("https://api.github.com/repos/example/project", {
         headers: { authorization: "Bearer {{secret:shitrat-github/example}}" },

@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { createPublicKey, generateKeyPairSync, verify } from "node:crypto"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { buildCellGitInvocation } from "../src/git-push.js"
-import { deriveCallerDocument, verifyCallerDocument } from "../src/github-cell.js"
+import { deriveCallerDocument, verifyCallerDocument, verifyProtectedFile } from "../src/github-cell.js"
 
 const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } })
 const signing = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey.export({ format: "jwk" })
@@ -12,14 +12,16 @@ const identity = JSON.stringify({ did: "did:web:fixture.example.invalid", signin
 const fixture = path.join(import.meta.dir, "fixtures/cell-client.ts")
 const readOrEmpty = async (file: string) => readFile(file, "utf8").catch(() => "")
 type Seen = { method: string; path: string; search: string; authorization: string | null; auth: string | null; body: Buffer }
-type NonceRecord = { command: string; nonce: string | null }
+type NonceRecord = { command: string; nonce: string | null; identityPresent: boolean; privateKeyPresent: boolean }
 type ForwardRequest = { token: string; nonce: string }
-type GitChild = { args: string[]; nonceEnv: string | null; traceKeys: string[] }
+type GitChild = { args: string[]; nonceEnv: string | null; traceKeys: string[]; identityPresent: boolean; privateKeyPresent: boolean }
 
 const scenario = async (input: {
   via?: string
   noName?: boolean
-  config?: "file" | "override" | "missing" | "malformed"
+  nameOff?: boolean
+  config?: "file" | "override" | "missing" | "malformed" | "relative-bin"
+  configMode?: number
   lease?: "ok" | "refused" | "invalid"
   unreachable?: boolean
   fallback?: string
@@ -30,9 +32,11 @@ const scenario = async (input: {
   missingIdentity?: boolean
   identityFile?: string
   cli?: boolean
+  pushCli?: boolean
   cliArgs?: string[]
   runnerFailure?: { status: number; headers?: Record<string, string>; message: string }
   forwardFailure?: boolean
+  failureEnvelope?: boolean
   unavailableClient?: boolean
   gitTracing?: boolean
   capability?: "old" | "garbage" | "timeout" | "missing" | "false" | "extra"
@@ -110,12 +114,13 @@ const scenario = async (input: {
         return Response.json({ total_count: 2, workflow_runs: [{ id: (status === "queued" ? 0 : 10) + page }] }, { headers: next })
       }
       if (apiPath.endsWith("/jobs")) return Response.json({ total_count: 2, jobs: [{ id: page, name: "build", status: "queued", labels: ["self-hosted", "linux", "pool-a"], runner_name: "runner-1", runner_group_name: "pool-a", created_at: "2026-01-01T00:00:00Z", started_at: null }] }, { headers })
-      return Response.json({ full_name: "example/project", cell: true })
+      return Response.json({ full_name: "example/project", cell: true, ...(input.pushCli ? { private: true } : {}) })
     },
   })
-  if (input.config === "file" || input.config === "override" || input.config === "malformed") {
+  if (input.config === "file" || input.config === "override" || input.config === "malformed" || input.config === "relative-bin") {
     await mkdir(path.dirname(configFile), { recursive: true })
-    await writeFile(configFile, input.config === "malformed" ? "not JSON" : JSON.stringify(input.config === "override" ? { url: "http://127.0.0.1:1", audience: "wrong-audience", scBin: "missing-sc" } : { url: server.url.origin, audience: "did:web:cell.example.invalid", scBin: client }))
+    await writeFile(configFile, input.config === "malformed" ? "not JSON" : JSON.stringify(input.config === "override" ? { url: "http://127.0.0.1:1", audience: "wrong-audience", scBin: "missing-sc" } : { url: server.url.origin, audience: "did:web:cell.example.invalid", scBin: input.config === "relative-bin" ? "sc" : client }), { mode: input.configMode ?? 0o600 })
+    if (input.configMode !== undefined) await chmod(configFile, input.configMode)
   }
   const run = async (args: string[] = []): Promise<Result> => {
     const nodeModule = path.join(home, "github-cell.mjs")
@@ -124,10 +129,10 @@ const scenario = async (input: {
       expect(build.success).toBe(true)
       await writeFile(nodeModule, await build.outputs[0]!.text())
     }
-    const proc = Bun.spawn(input.mode === "no-bun" ? ["node", path.join(import.meta.dir, "fixtures/cell-node-driver.mjs"), nodeModule] : [process.execPath, "--preload", path.join(import.meta.dir, "fixtures/cell-direct-preload.ts"), ...(input.cli ? [path.join(import.meta.dir, "../src/cli.ts"), ...(input.cliArgs ?? ["status", "example/project"])] : [path.join(import.meta.dir, input.mode === "dead-forward" ? "fixtures/cell-dead-forward-driver.ts" : "fixtures/cell-driver.ts"), input.mode ?? "repo"])], {
+    const proc = Bun.spawn(input.mode === "no-bun" ? ["node", path.join(import.meta.dir, "fixtures/cell-node-driver.mjs"), nodeModule] : [process.execPath, "--preload", path.join(import.meta.dir, "fixtures/cell-direct-preload.ts"), ...(input.cli || input.pushCli ? [path.join(import.meta.dir, "../src/cli.ts"), ...(input.pushCli ? ["push", "example/project", "--repo-dir", path.join(home, "local"), "--allow-any-author", "--dry-run"] : input.cliArgs ?? ["status", "example/project"])] : [path.join(import.meta.dir, input.mode === "dead-forward" ? "fixtures/cell-dead-forward-driver.ts" : "fixtures/cell-driver.ts"), input.mode ?? "repo"])], {
       env: {
         PATH: `${binDir}:${process.env.PATH}`, HOME: home,
-        ...(!input.noName ? { RATKING_NAME: "fixture/agent" } : {}),
+        ...(!input.noName ? { RATKING_NAME: input.nameOff ? "off" : "fixture/agent" } : {}),
         ...(!input.config || input.config === "override" ? { SC_URL: input.unreachable ? "http://127.0.0.1:1" : server.url.origin, SC_AUDIENCE: "did:web:cell.example.invalid" } : {}),
         ...(input.config === "override" ? { SHITRAT_CELL_CONFIG: configFile } : {}),
         ...(input.lease ? { CELL_TEST_LEASE_VALUE: input.lease === "invalid" ? "invalid-identity" : identity } : {}),
@@ -140,11 +145,13 @@ const scenario = async (input: {
         ...(input.mode === "nonce-refusal" ? { CELL_TEST_NONCE_REFUSAL: "1" } : {}),
         ...(input.mode === "nonce-echo" ? { CELL_TEST_ECHO_NONCE: "1" } : {}),
         ...(input.forwardFailure ? { CELL_TEST_FORWARD_FAIL: "1" } : {}),
+        ...(input.failureEnvelope ? { CELL_TEST_CLI_ENVELOPE_DEFECT: "1" } : {}),
         ...(input.via ? { SHITRAT_GITHUB_VIA: input.via } : {}),
         ...(input.fallback ? { SHITRAT_GITHUB_CELL_FALLBACK: input.fallback } : {}),
         SHITRAT_GITHUB_APP_ID: "123", SHITRAT_GITHUB_PRIVATE_KEY: privateKey, SHITRAT_GITHUB_CLIENT_ID: "fixture-client", SHITRAT_GITHUB_INSTALLATIONS_JSON: '{"example":123}',
         CELL_TEST_DIRECT: path.join(home, "direct"), CELL_TEST_ARGV: path.join(home, "argv"),
         CELL_TEST_GIT_ARGS: JSON.stringify(args), CELL_TEST_GIT_CWD: path.join(home, "local"),
+        ...(input.git && input.config === "missing" ? { CELL_TEST_DIRECT_GIT_REMOTE: path.join(home, "example/project.git") } : {}),
         CELL_TEST_GIT_CHILDREN: path.join(home, "git-children"),
         ...(input.gitTracing ? { GIT_TRACE: "1", GIT_TRACE_CURL: "1", GIT_TRACE_PACKET: "1", GIT_CURL_VERBOSE: "1", GIT_REDACT_COOKIES: "fixture", GIT_TRACE2_EVENT: path.join(home, "git-trace") } : {}),
       },
@@ -157,9 +164,14 @@ const scenario = async (input: {
     const forwardRequests: ForwardRequest[] = (await readOrEmpty(path.join(home, "forward-requests"))).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
     const gitChildren: GitChild[] = (await readOrEmpty(path.join(home, "git-children"))).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
     const gitTrace = await readOrEmpty(path.join(home, "git-trace"))
+    for (const secret of [privateKey, signing.d!, identity, "FAKE-INSTALLATION-TOKEN"]) expect(JSON.stringify(gitChildren)).not.toContain(secret)
     for (const child of gitChildren) {
-      expect(child.nonceEnv).toBeNull()
-      expect(child.traceKeys).toEqual([])
+      expect(child.identityPresent).toBe(false)
+      if (child.args.includes("protocol.http.allow=always")) {
+        expect(child.nonceEnv).toBeNull()
+        expect(child.privateKeyPresent).toBe(false)
+        expect(child.traceKeys).toEqual([])
+      }
     }
     for (const { command, nonce } of nonces) {
       if (command !== "forward") expect(nonce).toBeNull()
@@ -199,6 +211,9 @@ describe("GitHub cell route", () => {
     }
     const custom = JSON.stringify({ ...JSON.parse(identity), kid: "#custom" })
     expect(JSON.stringify(deriveCallerDocument(custom))).toContain("#custom")
+    for (const kid of ["did:web:other.example.invalid#key", "did:web:fixture.example.invalid#key", "not-a-fragment"]) {
+      expect(() => deriveCallerDocument(JSON.stringify({ ...JSON.parse(identity), kid }))).toThrow()
+    }
   })
   test("auto without RATKING_NAME stays direct and never leases", async () => {
     const result = await scenario({ noName: true, missingIdentity: true })
@@ -207,6 +222,64 @@ describe("GitHub cell route", () => {
     expect(result.leases).toBe("")
     expect(result.argv).toBe("")
     expect(result.stderr).toContain('"path":"direct"')
+  })
+  test("auto with RATKING_NAME=off opts out even with explicit identity and URL", async () => {
+    const result = await scenario({ nameOff: true })
+    expect(result.exit).toBe(0)
+    expect(result.direct).not.toBe("")
+    expect(result.leases).toBe("")
+    expect(result.argv).toBe("")
+  })
+  test("auto honours explicit identity plus URL without RATKING_NAME", async () => {
+    const result = await scenario({ noName: true, missingDocument: true })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout).data.cell).toBe(true)
+    expect(result.direct).toBe("")
+    expect(result.leases).toBe("")
+    expect(result.stderr).toContain('"path":"cell"')
+  })
+  test("protected files must be regular, mode 0600, and owned by the current user", () => {
+    const uid = process.getuid!()
+    const stat = { isFile: () => true, mode: 0o600, uid }
+    expect(() => verifyProtectedFile(stat)).not.toThrow()
+    expect(() => verifyProtectedFile({ ...stat, uid: uid + 1 })).toThrow()
+    expect(() => verifyProtectedFile({ ...stat, isFile: () => false })).toThrow()
+    for (const mode of [0o644, 0o620, 0o602, 0o660, 0o666]) expect(() => verifyProtectedFile({ ...stat, mode })).toThrow()
+  })
+  for (const configMode of [0o644, 0o620, 0o602, 0o660, 0o666]) test(`auto refuses insecure cell.json mode ${configMode.toString(8)} before leasing`, async () => {
+    const result = await scenario({ config: "file", configMode, missingIdentity: true, lease: "ok" })
+    expect(result.exit).toBe(0)
+    expect(result.direct).not.toBe("")
+    expect(result.leases).toBe("")
+    expect(result.argv).toBe("")
+    expect(result.stderr).toContain('"reason":"cell-configuration"')
+  })
+  test("auto refuses a relative scBin before leasing", async () => {
+    const result = await scenario({ config: "relative-bin", missingIdentity: true, lease: "ok" })
+    expect(result.exit).toBe(0)
+    expect(result.direct).not.toBe("")
+    expect(result.leases).toBe("")
+    expect(result.argv).toBe("")
+    expect(result.stderr).toContain('"reason":"cell-configuration"')
+  })
+  for (const failureEnvelope of [false, true]) test(`auto leased identity stays out of the CLI failure envelope when the forward echoes it (outer catch=${failureEnvelope})`, async () => {
+    const result = await scenario({ cli: true, config: "file", missingIdentity: true, missingDocument: true, lease: "ok", forwardFailure: true, failureEnvelope })
+    expect(result.exit).toBe(1)
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false })
+    if (failureEnvelope) expect(JSON.parse(result.stdout)).toMatchObject({ error: { code: "CLI_USAGE_ERROR" } })
+    expect(result.leases).not.toBe("")
+    expect(result.argv).toContain('"forward"')
+    expect(result.stdout).not.toContain(signing.d!)
+    expect(result.stderr).not.toContain(signing.d!)
+    expect(result.stdout).not.toContain(identity)
+    expect(result.stderr).not.toContain(identity)
+    // cli.ts captures String(chunk): a raw Uint8Array must not leak private
+    // material as comma-separated byte values instead of decoded text either.
+    for (const value of [identity, signing.d!]) {
+      const bytes = Array.from(new TextEncoder().encode(value)).join(",")
+      expect(result.stdout).not.toContain(bytes)
+      expect(result.stderr).not.toContain(bytes)
+    }
   })
   test("auto without config stays direct and never leases", async () => {
     const result = await scenario({ config: "missing", missingIdentity: true })
@@ -719,6 +792,47 @@ describe("GitHub cell route", () => {
     expect(invocation.env.GIT_CONFIG_VALUE_2).toBe("x-sc-forward-token: fixture-run-nonce")
     expect(invocation.args.join(" ")).not.toContain("fixture-run-nonce")
     expect(invocation.env).not.toHaveProperty("SHITRAT_PUSH_TOKEN")
+  })
+  for (const config of ["file", "missing"] as const) for (const pushCli of [false, true]) test(`auto ${pushCli ? "push CLI dry run" : "real push"} uses ${config === "file" ? "cell" : "direct without lease or probe"}`, async () => {
+    await scenario({ config, pushCli, mode: "auto-push", missingIdentity: true, missingDocument: true, lease: "ok", git: async (home, run) => {
+      const local = path.join(home, "local")
+      await mkdir(path.join(home, "example"))
+      const git = async (args: string[], cwd = home) => {
+        const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+        const [stdout, stderr, exit] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+        if (exit !== 0) throw new Error(stderr)
+        return stdout.trim()
+      }
+      await git(["init", "--bare", "-b", "main", "example/project.git"])
+      await git(["config", "http.receivepack", "true"], path.join(home, "example/project.git"))
+      await git(["init", "-b", "main", "local"])
+      await git(["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture"], local)
+      await git(["remote", "add", "origin", "https://github.com/example/project.git"], local)
+      const sha = await git(["rev-parse", "HEAD"], local)
+      const result = await run(["push", "https://github.com/example/project.git", "HEAD:refs/heads/main"])
+      expect(result.exit).toBe(0)
+      expect(result.gitChildren.some((child) => child.args.includes("push"))).toBe(true)
+      expect(result.gitChildren.every((child) => !child.identityPresent)).toBe(true)
+      if (pushCli) expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, result: { dry_run: true, would_push: 1 } })
+      else expect(await git(["rev-parse", "refs/heads/main"], path.join(home, "example/project.git"))).toBe(sha)
+      if (config === "file") {
+        expect(result.stderr).toContain('"path":"cell"')
+        expect(result.direct).toBe("")
+        expect(result.leases.trim().split("\n")).toHaveLength(1)
+        expect(result.probes).toBe(1)
+        expect(result.nonces).toHaveLength(pushCli ? 2 : 1)
+        for (const forward of result.nonces) expect(forward).toMatchObject({ command: "forward", identityPresent: true, privateKeyPresent: false })
+        expect(result.gitChildren.every((child) => !child.privateKeyPresent)).toBe(true)
+      } else {
+        expect(result.stderr).toContain('"path":"direct"')
+        expect(result.leases).toBe("")
+        expect(result.probes).toBe(0)
+        expect(result.argv).toBe("")
+        expect(result.nonces).toEqual([])
+        expect(result.direct).not.toBe("")
+      }
+      return result
+    } })
   })
   for (const gitTracing of [false, true]) test(`real git smart HTTP pushes binary packs and fetches through the fake cell (parent tracing=${gitTracing})`, async () => {
     await scenario({ via: "cell", mode: "git", gitTracing, git: async (home, run) => {
