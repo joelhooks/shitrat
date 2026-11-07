@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { buildCellGitInvocation } from "../src/git-push.js"
+import { deriveCallerDocument, verifyCallerDocument } from "../src/github-cell.js"
 
 const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } })
 const signing = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey.export({ format: "jwk" })
@@ -17,6 +18,10 @@ type GitChild = { args: string[]; nonceEnv: string | null; traceKeys: string[] }
 
 const scenario = async (input: {
   via?: string
+  noName?: boolean
+  config?: "file" | "override" | "missing" | "malformed"
+  lease?: "ok" | "refused" | "invalid"
+  unreachable?: boolean
   fallback?: string
   refusal?: boolean
   fetchRefusal?: boolean
@@ -41,6 +46,11 @@ const scenario = async (input: {
   // The probe has no inherited test hooks; the fake executable owns its fixture
   // configuration, just as a real executable owns its capability implementation.
   await writeFile(client, `#!${process.execPath}\nprocess.env.CELL_TEST_ARGV = ${JSON.stringify(path.join(home, "argv"))};\nprocess.env.CELL_TEST_NONCES = ${JSON.stringify(path.join(home, "nonces"))};\nprocess.env.CELL_TEST_CAPABILITY_MODE = ${JSON.stringify(input.capability ?? "supported")};\nawait import(${JSON.stringify(fixture)});\n`, { mode: 0o755 })
+  const binDir = path.join(home, "bin")
+  await mkdir(binDir)
+  // Secret values travel over stdout to the CLI, never in recorded argv.
+  await writeFile(path.join(binDir, "secrets"), `#!${process.execPath}\nimport { appendFile } from "node:fs/promises";\nawait appendFile(${JSON.stringify(path.join(home, "leases"))}, JSON.stringify(process.argv.slice(2)) + "\\n");\nprocess.stdout.write(process.env.CELL_TEST_LEASE_VALUE ?? ""); process.exit(${input.lease === "refused" ? 1 : 0});\n`, { mode: 0o755 })
+  const configFile = input.config === "override" ? path.join(home, "custom-cell.json") : path.join(home, ".config/shitrat/cell.json")
   const documentFile = path.join(home, "caller-public.json")
   const did = "did:web:fixture.example.invalid"
   await writeFile(documentFile, JSON.stringify({
@@ -103,6 +113,10 @@ const scenario = async (input: {
       return Response.json({ full_name: "example/project", cell: true })
     },
   })
+  if (input.config === "file" || input.config === "override" || input.config === "malformed") {
+    await mkdir(path.dirname(configFile), { recursive: true })
+    await writeFile(configFile, input.config === "malformed" ? "not JSON" : JSON.stringify(input.config === "override" ? { url: "http://127.0.0.1:1", audience: "wrong-audience", scBin: "missing-sc" } : { url: server.url.origin, audience: "did:web:cell.example.invalid", scBin: client }))
+  }
   const run = async (args: string[] = []): Promise<Result> => {
     const nodeModule = path.join(home, "github-cell.mjs")
     if (input.mode === "no-bun") {
@@ -112,12 +126,15 @@ const scenario = async (input: {
     }
     const proc = Bun.spawn(input.mode === "no-bun" ? ["node", path.join(import.meta.dir, "fixtures/cell-node-driver.mjs"), nodeModule] : [process.execPath, "--preload", path.join(import.meta.dir, "fixtures/cell-direct-preload.ts"), ...(input.cli ? [path.join(import.meta.dir, "../src/cli.ts"), ...(input.cliArgs ?? ["status", "example/project"])] : [path.join(import.meta.dir, input.mode === "dead-forward" ? "fixtures/cell-dead-forward-driver.ts" : "fixtures/cell-driver.ts"), input.mode ?? "repo"])], {
       env: {
-        PATH: process.env.PATH, HOME: home,
-        SC_URL: server.url.origin, SC_AUDIENCE: "did:web:cell.example.invalid",
+        PATH: `${binDir}:${process.env.PATH}`, HOME: home,
+        ...(!input.noName ? { RATKING_NAME: "fixture/agent" } : {}),
+        ...(!input.config || input.config === "override" ? { SC_URL: input.unreachable ? "http://127.0.0.1:1" : server.url.origin, SC_AUDIENCE: "did:web:cell.example.invalid" } : {}),
+        ...(input.config === "override" ? { SHITRAT_CELL_CONFIG: configFile } : {}),
+        ...(input.lease ? { CELL_TEST_LEASE_VALUE: input.lease === "invalid" ? "invalid-identity" : identity } : {}),
         ...(!input.missingIdentity ? { SC_IDENTITY_JSON: identity } : {}),
         ...(input.identityFile ? { SHITRAT_CELL_IDENTITY_FILE: input.identityFile } : {}),
         ...(!input.missingDocument ? { SHITRAT_CELL_CALLER_DOCUMENT_FILE: documentFile } : {}),
-        SHITRAT_SC_BIN: input.oldClient ? process.env.SHITRAT_TEST_OLD_SC_BIN : input.unavailableClient ? path.join(home, "missing-sc") : input.forwardFailure || input.capability || input.mode?.startsWith("nonce-") ? client : process.env.SHITRAT_TEST_SC_BIN ?? client,
+        ...(!input.config || input.config === "override" ? { SHITRAT_SC_BIN: input.oldClient ? process.env.SHITRAT_TEST_OLD_SC_BIN : input.unavailableClient ? path.join(home, "missing-sc") : input.forwardFailure || input.capability || input.mode?.startsWith("nonce-") ? client : process.env.SHITRAT_TEST_SC_BIN ?? client } : {}),
         SC_FORWARD_NONCE: "inherited-nonce-must-be-replaced-not-forwarded",
         CELL_TEST_NONCES: path.join(home, "nonces"), CELL_TEST_FORWARD_REQUESTS: path.join(home, "forward-requests"),
         ...(input.mode === "nonce-refusal" ? { CELL_TEST_NONCE_REFUSAL: "1" } : {}),
@@ -154,7 +171,7 @@ const scenario = async (input: {
       }
     }
     for (const request of forwardRequests) expect(request.token).toBe(request.nonce)
-    return { stdout, stderr, exit, argv, nonces: nonces.filter((record) => record.command === "forward"), probes: nonces.filter((record) => record.command === "capabilities").length, forwardRequests, gitChildren, gitTrace, direct: await readOrEmpty(path.join(home, "direct")), seen }
+    return { stdout, stderr, exit, argv, leases: await readOrEmpty(path.join(home, "leases")), nonces: nonces.filter((record) => record.command === "forward"), probes: nonces.filter((record) => record.command === "capabilities").length, forwardRequests, gitChildren, gitTrace, direct: await readOrEmpty(path.join(home, "direct")), seen }
   }
   try {
     if (input.git) return await input.git(home, run)
@@ -164,9 +181,101 @@ const scenario = async (input: {
     await rm(home, { recursive: true, force: true })
   }
 }
-type Result = { stdout: string; stderr: string; exit: number; argv: string; nonces: NonceRecord[]; probes: number; forwardRequests: ForwardRequest[]; gitChildren: GitChild[]; gitTrace: string; direct: string; seen: Seen[] }
+type Result = { leases: string; stdout: string; stderr: string; exit: number; argv: string; nonces: NonceRecord[]; probes: number; forwardRequests: ForwardRequest[]; gitChildren: GitChild[]; gitTrace: string; direct: string; seen: Seen[] }
 
 describe("GitHub cell route", () => {
+  test("derived caller document is public-only and verifies without a file", () => {
+    const document = deriveCallerDocument(identity)
+    expect(() => verifyCallerDocument(identity, document)).not.toThrow()
+    expect(JSON.stringify(document)).not.toContain('"d":')
+    expect(JSON.stringify(document)).not.toContain(signing.d!)
+    expect(document).toEqual({ id: "did:web:fixture.example.invalid", authentication: ["did:web:fixture.example.invalid#atproto"], verificationMethod: [{ id: "did:web:fixture.example.invalid#atproto", controller: "did:web:fixture.example.invalid", publicKeyJwk: { kty: signing.kty, crv: signing.crv, x: signing.x, y: signing.y } }] })
+    for (const mutation of ["did", "key", "private"]) {
+      const changed = JSON.parse(JSON.stringify(document))
+      if (mutation === "did") changed.id = "did:web:wrong.example.invalid"
+      if (mutation === "key") changed.verificationMethod[0].publicKeyJwk.x = "wrong-key"
+      if (mutation === "private") changed.verificationMethod[0].publicKeyJwk.d = signing.d
+      expect(() => verifyCallerDocument(identity, changed)).toThrow()
+    }
+    const custom = JSON.stringify({ ...JSON.parse(identity), kid: "#custom" })
+    expect(JSON.stringify(deriveCallerDocument(custom))).toContain("#custom")
+  })
+  test("auto without RATKING_NAME stays direct and never leases", async () => {
+    const result = await scenario({ noName: true, missingIdentity: true })
+    expect(result.exit).toBe(0)
+    expect(result.direct).not.toBe("")
+    expect(result.leases).toBe("")
+    expect(result.argv).toBe("")
+    expect(result.stderr).toContain('"path":"direct"')
+  })
+  test("auto without config stays direct and never leases", async () => {
+    const result = await scenario({ config: "missing", missingIdentity: true })
+    expect(result.exit).toBe(0)
+    expect(result.direct).not.toBe("")
+    expect(result.leases).toBe("")
+    expect(result.argv).toBe("")
+    expect(result.stderr).toContain('"reason":"cell-configuration"')
+  })
+  for (const config of ["file", "override"] as const) test(`auto leases once and derives caller document (${config})`, async () => {
+    const result = await scenario({ config, missingIdentity: true, missingDocument: true, lease: "ok", mode: "twice" })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout).data.cell).toBe(true)
+    expect(result.direct).toBe("")
+    expect(result.leases.trim().split("\n").map((line) => JSON.parse(line))).toEqual([["lease", "rat_king_fleet_agent_fixture.agent_identity", "--client-id", "shitrat-cell", "--ttl", "5m"]])
+    expect(result.seen).toHaveLength(3)
+    expect(result.stderr).toContain('"path":"cell"')
+  })
+  for (const lease of ["refused", "invalid"] as const) test(`auto identity lease ${lease} falls back without leaking`, async () => {
+    const result = await scenario({ config: "file", missingIdentity: true, missingDocument: true, lease })
+    expect(result.exit).toBe(0)
+    expect(result.direct).not.toBe("")
+    expect(result.leases).not.toBe("")
+    expect(result.argv).toBe("")
+    expect(result.stderr).toContain('"reason":"cell-configuration"')
+    expect(result.stdout + result.stderr).not.toContain("invalid-identity")
+  })
+  test("auto CLI status emits its route even when stdout is a JSON envelope", async () => {
+    const result = await scenario({ cli: true, config: "file", missingIdentity: true, missingDocument: true, lease: "ok" })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, result: { repo: "example/project" } })
+    expect(result.stderr.trim()).toBe('{"event":"github-route","path":"cell","reason":"requested"}')
+    expect(result.direct).toBe("")
+    expect(result.leases.trim().split("\n")).toHaveLength(1)
+  })
+  test("auto explicit identity derives document and skips lease", async () => {
+    const result = await scenario({ via: "auto", missingDocument: true })
+    expect(result.exit).toBe(0)
+    expect(result.leases).toBe("")
+    expect(result.direct).toBe("")
+    expect(result.seen).toHaveLength(2)
+  })
+  test("auto unreachable during setup falls back with bounded reason", async () => {
+    const result = await scenario({ unreachable: true })
+    expect(result.exit).toBe(0)
+    expect(result.stderr).toContain('"path":"direct","reason":"cell-refused"')
+    expect(result.direct).not.toBe("")
+    expect(result.forwardRequests).toEqual([])
+  })
+  for (const mode of ["fallback-after-request", "fallback-write-timeout", "fallback-write-abort"] as const) test(`auto ${mode} never replays through direct without a fallback flag`, async () => {
+    const result = await scenario({ mode })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ directCalls: 0, error: {} })
+    expect(result.seen).toHaveLength(1)
+    expect(result.direct).toBe("")
+    expect(result.stderr).not.toContain('"path":"direct"')
+  })
+  test("explicit cell ignores auto config and fails closed without env", async () => {
+    const result = await scenario({ via: "cell", config: "file", missingIdentity: true })
+    expect(result.exit).toBe(1)
+    expect(result.leases).toBe("")
+    expect(result.direct).toBe("")
+  })
+  test("explicit direct ignores auto config and identity leasing", async () => {
+    const result = await scenario({ via: "direct", config: "malformed", missingIdentity: true })
+    expect(result.exit).toBe(0)
+    expect(result.leases).toBe("")
+    expect(result.argv).toBe("")
+  })
   for (const capability of ["old", "garbage", "timeout", "missing", "false"] as const) test(`unsupported sc capability refuses before describe/forward without fallback (${capability})`, async () => {
     const result = await scenario({ via: "cell", fallback: "direct", capability, cli: true })
     expect(result.exit).toBe(1)
@@ -258,7 +367,7 @@ describe("GitHub cell route", () => {
     expect(result.seen).toEqual([])
     expect(result.direct).toContain("/app/installations/123/access_tokens")
   })
-  test("unset route defaults to cell without loading direct credentials", async () => {
+  test("unset route with fleet identity defaults to cell without loading direct credentials", async () => {
     const result = await scenario({})
     expect(result.exit).toBe(0)
     expect(JSON.parse(result.stdout).data.cell).toBe(true)
@@ -339,6 +448,7 @@ describe("GitHub cell route", () => {
     expect(result.direct).toContain("/app/installations/123/access_tokens")
     expect(result.argv).toBe("")
     expect(result.seen).toEqual([])
+    expect(result.stderr).toContain('{"event":"github-route","path":"direct","reason":"selected"}')
   })
   for (const via of [undefined, "cell"]) test(`status CLI works without direct installation discovery (via=${via ?? "unset"})`, async () => {
     const result = await scenario({ ...(via === undefined ? {} : { via }), cli: true })

@@ -22,6 +22,9 @@ if (process.env.CELL_TEST_FORWARD_FAIL === "1" && args.includes("forward")) {
   process.stderr.write((nonce ?? "") + (process.env.SC_IDENTITY_JSON ?? ""))
   process.exit(3)
 }
+// Assert the credential reaches sc's env, without recording private material.
+const identity: unknown = JSON.parse(process.env.SC_IDENTITY_JSON ?? "null")
+if (typeof identity !== "object" || identity === null || !("did" in identity) || identity.did !== "did:web:fixture.example.invalid" || !("signing" in identity) || typeof identity.signing !== "object" || identity.signing === null || !("d" in identity.signing)) process.exit(9)
 const headers = { "x-sc-auth": "fixture-caller-token" }
 if (args.includes("describe")) {
   const response = await fetch(`${origin}/v1/describe?name=shitrat-github`, { headers, redirect: "manual" })

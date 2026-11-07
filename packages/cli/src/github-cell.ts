@@ -2,6 +2,8 @@ import { createServer } from "node:net"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { constants } from "node:fs"
 import { open, readFile } from "node:fs/promises"
+import { homedir } from "node:os"
+import { join } from "node:path"
 
 export class GitHubCellError extends Error {
   readonly code = "GITHUB_CELL_ERROR"
@@ -18,12 +20,15 @@ export const logGitHubPath = (path: "cell" | "direct", reason: string): void => 
   process.stderr.write(`${JSON.stringify({ event: "github-route", path, reason })}\n`)
 }
 
+const autoRoute = (): boolean => process.env.SHITRAT_GITHUB_VIA === undefined || process.env.SHITRAT_GITHUB_VIA === "auto"
+const setupFallbackEnabled = (): boolean => autoRoute() || process.env.SHITRAT_GITHUB_CELL_FALLBACK === "direct"
+
 export const githubViaCell = (): boolean => {
   const via = process.env.SHITRAT_GITHUB_VIA
-  if (via !== undefined && via !== "direct" && via !== "cell") throw new GitHubCellError("configuration")
+  if (via !== undefined && via !== "auto" && via !== "direct" && via !== "cell") throw new GitHubCellError("configuration")
   const fallback = process.env.SHITRAT_GITHUB_CELL_FALLBACK
   if (fallback !== undefined && fallback !== "direct") throw new GitHubCellError("configuration")
-  return via !== "direct"
+  return autoRoute() ? !!process.env.RATKING_NAME && process.env.RATKING_NAME !== "off" : via !== "direct"
 }
 
 const clientEnvironment = (): NodeJS.ProcessEnv => {
@@ -48,9 +53,9 @@ const protectedIdentity = async (file: string): Promise<string> => {
   }
 }
 
-const verifyCallerDocument = async (identityJson: string, documentFile: string): Promise<void> => {
+export const verifyCallerDocument = (identityJson: string, callerDocument: unknown): void => {
   const identity = objectValue(JSON.parse(identityJson))
-  const document = objectValue(JSON.parse(await readFile(documentFile, "utf8")))
+  const document = objectValue(callerDocument)
   const signing = objectValue(identity.signing)
   if (typeof identity.did !== "string" || identity.did !== document.id || signing.kty !== "EC" || signing.crv !== "P-256") {
     throw new GitHubCellError("configuration")
@@ -68,7 +73,67 @@ const verifyCallerDocument = async (identityJson: string, documentFile: string):
   }
 }
 
-const clientConfiguration = async (): Promise<{ args: string[]; env: NodeJS.ProcessEnv }> => {
+export const deriveCallerDocument = (identityJson: string): unknown => {
+  const identity = objectValue(JSON.parse(identityJson))
+  const signing = objectValue(identity.signing)
+  const kid = identity.kid ?? "#atproto"
+  if (typeof identity.did !== "string" || typeof kid !== "string") throw new GitHubCellError("configuration")
+  const id = kid.startsWith("#") ? `${identity.did}${kid}` : kid
+  // Project public fields explicitly. Never spread a private JWK into this document.
+  const publicKeyJwk = { kty: signing.kty, crv: signing.crv, x: signing.x, y: signing.y }
+  const document = { id: identity.did, verificationMethod: [{ id, controller: identity.did, publicKeyJwk }], authentication: [id] }
+  verifyCallerDocument(identityJson, document)
+  return document
+}
+
+type ClientConfiguration = { args: string[]; env: NodeJS.ProcessEnv }
+
+const autoClientConfiguration = async (): Promise<ClientConfiguration> => {
+  try {
+    let local: Record<string, unknown> = {}
+    try {
+      local = objectValue(JSON.parse(await readFile(process.env.SHITRAT_CELL_CONFIG ?? join(homedir(), ".config/shitrat/cell.json"), "utf8")))
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error
+    }
+    const url = process.env.SC_URL ?? local.url
+    const audience = process.env.SC_AUDIENCE ?? local.audience
+    const bin = process.env.SHITRAT_SC_BIN ?? local.scBin ?? "sc"
+    if (typeof url !== "string" || !url || typeof audience !== "string" || !audience || typeof bin !== "string" || !bin) throw new GitHubCellError("configuration")
+    const env = clientEnvironment()
+    const file = process.env.SHITRAT_CELL_IDENTITY_FILE
+    if (file && process.env.SC_IDENTITY_JSON) throw new GitHubCellError("configuration")
+    let identity = file ? await protectedIdentity(file) : process.env.SC_IDENTITY_JSON
+    if (!identity) {
+      const name = process.env.RATKING_NAME
+      if (!name || !/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_.-]+$/.test(name)) throw new GitHubCellError("configuration")
+      const proc = Bun.spawn(["secrets", "lease", `rat_king_fleet_agent_${name.replaceAll("/", ".")}_identity`, "--client-id", "shitrat-cell", "--ttl", "5m"], {
+        env, stdin: "ignore", stdout: "pipe", stderr: "ignore",
+      })
+      const timer = setTimeout(() => proc.kill("SIGKILL"), 10_000)
+      try {
+        const [value, exit] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
+        if (exit !== 0 || !value.trim()) throw new GitHubCellError("configuration")
+        identity = value.trim()
+      } finally { clearTimeout(timer) }
+    }
+    const document = process.env.SHITRAT_CELL_CALLER_DOCUMENT_FILE
+    verifyCallerDocument(identity, document ? JSON.parse(await readFile(document, "utf8")) : deriveCallerDocument(identity))
+    env.SC_URL = url
+    env.SC_AUDIENCE = audience
+    env.SC_IDENTITY_JSON = identity
+    return { args: [bin], env }
+  } catch {
+    // Never reflect parser errors, secret CLI output, or identity material.
+    throw new GitHubCellError("configuration")
+  }
+}
+
+const clientConfiguration = async (): Promise<ClientConfiguration> => {
+  if (autoRoute()) {
+    const command = commandForwards.getStore()
+    return command ? command.configuration ??= autoClientConfiguration() : autoClientConfiguration()
+  }
   try {
     if (!process.env.SC_URL || !process.env.SC_AUDIENCE) throw new GitHubCellError("configuration")
     const file = process.env.SHITRAT_CELL_IDENTITY_FILE
@@ -77,7 +142,7 @@ const clientConfiguration = async (): Promise<{ args: string[]; env: NodeJS.Proc
     const identity = file ? await protectedIdentity(file) : process.env.SC_IDENTITY_JSON
     if (!identity) throw new GitHubCellError("configuration")
     const document = process.env.SHITRAT_CELL_CALLER_DOCUMENT_FILE
-    if (document) await verifyCallerDocument(identity, document)
+    if (document) verifyCallerDocument(identity, JSON.parse(await readFile(document, "utf8")))
     else if (!env.SC_PASS_FILE) throw new GitHubCellError("configuration")
     env.SC_IDENTITY_JSON = identity
     return { args: [process.env.SHITRAT_SC_BIN ?? "sc"], env }
@@ -122,14 +187,19 @@ export const selectGitHubPath = async <T>(input: {
     return input.direct()
   }
   logGitHubPath("cell", "requested")
-  // Compatibility is a security boundary, not a setup failure eligible for fallback.
-  await requireForwardNonceSupport()
+  // Explicit cell keeps its fail-closed compatibility gate. Auto permits
+  // bounded configuration fallback here, still before any forwarded request.
+  if (!autoRoute()) await requireForwardNonceSupport()
   try {
+    if (autoRoute()) {
+      await clientConfiguration()
+      await requireForwardNonceSupport()
+    }
     return await input.cell()
   } catch (error) {
     // Fallback is legal only for bounded setup failures before *any* forwarded
     // operation in this command. Never replay an uncertain write over direct.
-    if (process.env.SHITRAT_GITHUB_CELL_FALLBACK !== "direct" ||
+    if (!setupFallbackEnabled() ||
       commandForwards.getStore()?.phase !== "setup" ||
       !(error instanceof GitHubCellError) || !setupFallbackReasons.has(error.reason)) throw error
     logGitHubPath("direct", `cell-${error.reason}`)
@@ -142,7 +212,7 @@ export const requireDirectGitHub = (): void => {
     logGitHubPath("direct", "selected")
     return
   }
-  if (process.env.SHITRAT_GITHUB_CELL_FALLBACK !== "direct" || commandForwards.getStore()?.phase !== "setup") {
+  if (!setupFallbackEnabled() || commandForwards.getStore()?.phase !== "setup") {
     logGitHubPath("cell", "unsupported-app-operation")
     throw new GitHubCellError("unsupported")
   }
@@ -167,7 +237,7 @@ type CellHost = "api.github.com" | "github.com"
 type CellForward = { readonly origin: string; readonly proc: Bun.Subprocess; readonly stop: () => Promise<void> }
 type CachedForward = Promise<CellForward> | GitHubCellError
 // Monotonic fallback boundary: setup -> requested. It never resets in a run.
-type CellCommand = { readonly nonce: string; readonly forwards: Map<CellHost, CachedForward>; capability?: Promise<void>; phase: "setup" | "requested" }
+type CellCommand = { readonly nonce: string; readonly forwards: Map<CellHost, CachedForward>; capability?: Promise<void>; configuration?: Promise<ClientConfiguration>; phase: "setup" | "requested" }
 const commandForwards = new AsyncLocalStorage<CellCommand>()
 
 const probeForwardNonceSupport = async (): Promise<void> => {
@@ -175,7 +245,8 @@ const probeForwardNonceSupport = async (): Promise<void> => {
   const unsupported = () => new GitHubCellError("configuration", "sc too old for forward nonce; update sc")
   let proc: Bun.Subprocess<"ignore", "pipe", "ignore">
   try {
-    proc = Bun.spawn([process.env.SHITRAT_SC_BIN ?? "sc", "forward", "--capabilities"], {
+    const bin = autoRoute() ? (await clientConfiguration()).args[0]! : process.env.SHITRAT_SC_BIN ?? "sc"
+    proc = Bun.spawn([bin, "forward", "--capabilities"], {
       // This probe needs no identity, pass, cell address or nonce.
       env: { PATH: process.env.PATH }, stdin: "ignore", stdout: "pipe", stderr: "ignore",
     })
