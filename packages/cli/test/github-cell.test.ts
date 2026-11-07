@@ -278,7 +278,20 @@ describe("GitHub cell route", () => {
       if (process.getuid?.() !== 0) expect(() => trustedExecutable(binary)).toThrow("sticky and root owned")
     } finally { await rm(root, { recursive: true, force: true }) }
   })
-  test("secrets PATH ignores relative and empty entries and refuses an absolute checkout resolution", async () => {
+  for (const cwdMode of ["ancestor", "filesystem root"]) test(`trusted secrets resolves from ${cwdMode} cwd`, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "shitrat-cwd-"))
+    try {
+      const tools = path.join(root, ".local/bin")
+      await mkdir(tools, { recursive: true })
+      const binary = path.join(tools, "secrets")
+      await writeFile(binary, "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+      const cwd = cwdMode === "ancestor" ? root : path.parse(root).root
+      const expected = { ok: true, result: await realpath(binary) }
+      expect(await trustDriver("resolve", undefined, cwd, tools)).toEqual(expected)
+      expect(await trustDriver("resolve", binary, cwd, "")).toEqual(expected)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+  test("secrets PATH ignores relative and empty entries but accepts a trusted absolute entry", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "shitrat-path-"))
     try {
       const repo = path.join(root, "repo")
@@ -290,9 +303,9 @@ describe("GitHub cell route", () => {
       }
       const allowed = await trustDriver("resolve", undefined, repo, `.:relative::${tools}`)
       expect(allowed).toEqual({ ok: true, result: await realpath(path.join(tools, "secrets")) })
-      const denied = await trustDriver("resolve", undefined, repo, repo)
-      expect(denied).toMatchObject({ ok: false, code: "UNTRUSTED_SECRETS_EXECUTABLE" })
-      expect(denied.message).toContain("outside the current working directory")
+      const absolute = await trustDriver("resolve", undefined, repo, repo)
+      expect(absolute).toEqual({ ok: true, result: await realpath(path.join(repo, "secrets")) })
+      await chmod(path.join(repo, "secrets"), 0o777)
       for (const mode of ["required", "optional", "write"]) {
         const absent = await trustDriver(mode, undefined, repo, ".:relative:")
         expect(absent).toMatchObject({ ok: false, code: "UNTRUSTED_SECRETS_EXECUTABLE" })
@@ -301,7 +314,7 @@ describe("GitHub cell route", () => {
         const unsafe = await trustDriver(mode, undefined, repo, repo)
         expect(unsafe).toMatchObject({ ok: false, code: "UNTRUSTED_SECRETS_EXECUTABLE" })
         expect(unsafe.message).toContain(await realpath(path.join(repo, "secrets")))
-        expect(unsafe.message).toContain("outside the current working directory")
+        expect(unsafe.message).toContain("target must not be group or world writable")
       }
       expect(await readOrEmpty(path.join(root, "decoy-ran"))).toBe("")
     } finally { await rm(root, { recursive: true, force: true }) }

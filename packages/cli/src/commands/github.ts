@@ -269,7 +269,7 @@ const printFailure = (
       return
     }
     if (cause instanceof UntrustedSecretsExecutableError) {
-      yield* Console.log(json(failure(command, cause.message, cause.code, "Install secrets in an absolute PATH directory outside this checkout; fix executable and ancestor ownership and permissions.", nextActions)))
+      yield* Console.log(json(failure(command, cause.message, cause.code, "Install secrets in an absolute PATH directory; fix executable and ancestor ownership and permissions.", nextActions)))
       return
     }
     seen.add(cause)

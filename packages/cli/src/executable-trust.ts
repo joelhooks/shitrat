@@ -1,5 +1,5 @@
 import { realpathSync, statSync } from "node:fs"
-import { delimiter, dirname, isAbsolute, relative, sep } from "node:path"
+import { delimiter, dirname, isAbsolute } from "node:path"
 
 export class ExecutableTrustError extends Error {
   constructor(readonly path: string, readonly rule: string) {
@@ -53,12 +53,7 @@ export const secretsExecutable = (configured?: unknown): string => {
       candidate = secretsPath.path
       if (!candidate) throw new ExecutableTrustError("secrets (PATH)", "no secrets executable found in absolute PATH entries")
     }
-    const resolved = trustedExecutable(candidate)
-    const withinCwd = relative(realpathSync(process.cwd()), resolved)
-    if (withinCwd === "" || (withinCwd !== ".." && !withinCwd.startsWith(`..${sep}`) && !isAbsolute(withinCwd))) {
-      throw new ExecutableTrustError(resolved, "secrets executable must be outside the current working directory")
-    }
-    return resolved
+    return trustedExecutable(candidate)
   } catch (error) {
     if (error instanceof ExecutableTrustError) throw new UntrustedSecretsExecutableError(error.path, error.rule)
     throw new UntrustedSecretsExecutableError(typeof candidate === "string" ? candidate : "secrets (PATH)", "executable and all ancestors must be accessible for trust checks")
