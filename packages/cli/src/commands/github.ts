@@ -33,6 +33,7 @@ import {
 import { attestPushedSha, withAttest } from "../attest.js"
 import { GitHubCellError, isCellPlaceholder } from "../github-cell.js"
 import { gitEnvironment } from "../child-environment.js"
+import { UntrustedSecretsExecutableError } from "../executable-trust.js"
 import { CiReadError, isFailingRun, readChecks, readJobLog, readPullRequestStatus, rerunWorkflowRun } from "../ci-reads.js"
 import { labelIssue, setCommitStatus } from "../labels-statuses.js"
 import { createAnnotatedTag, createGitHubRelease, GitHubReleaseError } from "../github-releases.js"
@@ -265,6 +266,10 @@ const printFailure = (
     if (cause instanceof GitHubCellError) {
       const envelope = failure(command, cause.message, cause.code, fix, nextActions)
       yield* Console.log(json({ ...envelope, error: { ...envelope.error, reason: cause.reason } }))
+      return
+    }
+    if (cause instanceof UntrustedSecretsExecutableError) {
+      yield* Console.log(json(failure(command, cause.message, cause.code, "Install secrets in an absolute PATH directory outside this checkout; fix executable and ancestor ownership and permissions.", nextActions)))
       return
     }
     seen.add(cause)

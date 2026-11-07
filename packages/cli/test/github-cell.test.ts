@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { createPublicKey, generateKeyPairSync, verify } from "node:crypto"
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
+import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { gitEnvironment } from "../src/child-environment.js"
+import { trustedExecutable } from "../src/executable-trust.js"
 import { buildCellGitInvocation } from "../src/git-push.js"
 import { deriveCallerDocument, verifyCallerDocument, verifyProtectedFile } from "../src/github-cell.js"
 
@@ -14,7 +16,7 @@ const readOrEmpty = async (file: string) => readFile(file, "utf8").catch(() => "
 type Seen = { method: string; path: string; search: string; authorization: string | null; auth: string | null; body: Buffer }
 type NonceRecord = { command: string; nonce: string | null; identityPresent: boolean; privateKeyPresent: boolean }
 type ForwardRequest = { token: string; nonce: string }
-type GitChild = { args: string[]; nonceEnv: string | null; traceKeys: string[]; identityPresent: boolean; privateKeyPresent: boolean; passPresent?: boolean; inheritedTokenPresent?: boolean }
+type GitChild = { args: string[]; nonceEnv: string | null; traceKeys: string[]; identityPresent: boolean; privateKeyPresent: boolean; passPresent?: boolean; inheritedTokenPresent?: boolean; identityFilePresent?: boolean; inheritedConfigPresent?: boolean }
 
 const scenario = async (input: {
   via?: string
@@ -24,7 +26,7 @@ const scenario = async (input: {
   configMode?: number
   configSymlink?: boolean
   secretsConfig?: boolean
-  trustFailure?: "sc-mode" | "sc-link" | "sc-parent" | "secrets-mode" | "secrets-path"
+  trustFailure?: "sc-mode" | "sc-link" | "sc-parent" | "sc-link-parent" | "secrets-mode" | "secrets-path"
   leaseGrandchild?: boolean
   describeHang?: boolean
   noAppEnv?: boolean
@@ -62,13 +64,30 @@ const scenario = async (input: {
   const binDir = path.join(home, "bin")
   await mkdir(binDir)
   // Synthetic secrets remain in env/stdout, never in fixture files or argv.
-  const secretsBin = path.join(binDir, "secrets")
+  let secretsBin = path.join(binDir, "secrets")
   await writeFile(secretsBin, `#!${process.execPath}\nimport { appendFile } from "node:fs/promises";\nawait appendFile(${JSON.stringify(path.join(home, "leases"))}, JSON.stringify(process.argv.slice(2)) + "\\n");\nawait appendFile(${JSON.stringify(path.join(home, "lease-env"))}, JSON.stringify(Object.keys(process.env)) + "\\n");\n${input.leaseGrandchild ? `Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 60000)"], { stdin: "ignore", stdout: "inherit", stderr: "ignore" });` : ""}\nconst values = JSON.parse(process.env.AGENT_SECRETS_TEST_VALUES ?? "{}");\nprocess.stdout.write(process.argv[3]?.startsWith("rat_king_fleet_agent_") ? process.env.AGENT_SECRETS_TEST_LEASE_VALUE ?? "" : values[process.argv[3]] ?? ""); process.exit(${input.lease === "refused" ? 1 : 0});\n`, { mode: 0o755 })
+  if (input.secretsConfig) {
+    const configuredDir = path.join(home, "configured-tools")
+    await mkdir(configuredDir)
+    const configured = path.join(configuredDir, "secrets")
+    await copyFile(secretsBin, configured)
+    await writeFile(secretsBin, `#!${process.execPath}\nimport { appendFileSync } from "node:fs"; appendFileSync(${JSON.stringify(path.join(home, "secrets-decoy"))}, "ran\\n"); process.exit(1);\n`)
+    secretsBin = configured
+  }
   const useFakeClient = !!(input.forwardFailure || input.capability || input.mode?.startsWith("nonce-") || input.describeHang || input.trustFailure || input.forceFakeClient)
   let selectedClient = useFakeClient ? client : process.env.SHITRAT_TEST_SC_BIN ?? client
   if (input.trustFailure === "sc-mode" || input.trustFailure === "sc-link") await chmod(client, 0o777)
   if (input.trustFailure === "sc-parent") await chmod(home, 0o777)
   if (input.trustFailure === "sc-link") { selectedClient = path.join(home, "sc-link"); await symlink(client, selectedClient) }
+  if (input.trustFailure === "sc-link-parent") {
+    const targetDir = path.join(home, "unsafe-target")
+    await mkdir(targetDir, { mode: 0o777 })
+    await chmod(targetDir, 0o777)
+    const target = path.join(targetDir, "sc")
+    await copyFile(client, target)
+    selectedClient = path.join(home, "safe-link")
+    await symlink(target, selectedClient)
+  }
   if (input.trustFailure === "secrets-mode") await chmod(secretsBin, 0o777)
   if (input.trustFailure === "secrets-path") await chmod(binDir, 0o777)
   let identityFile = input.identityFile
@@ -161,13 +180,14 @@ const scenario = async (input: {
         ...(!input.noName ? { RATKING_NAME: input.nameOff ? "off" : "fixture/agent" } : {}),
         ...(!input.config || input.config === "override" ? { SC_URL: input.unreachable ? "http://127.0.0.1:1" : server.url.origin, SC_AUDIENCE: "did:web:cell.example.invalid" } : {}),
         ...(input.config === "override" ? { SHITRAT_CELL_CONFIG: configFile } : {}),
+        OTEL_EMIT_ENDPOINT: "https://telemetry.example.invalid", OTEL_EMIT_TOKEN: "synthetic-telemetry-token",
         ...(input.lease ? { AGENT_SECRETS_TEST_LEASE_VALUE: input.lease === "invalid" ? "invalid-identity" : identity } : {}),
         ...(input.noAppEnv ? { AGENT_SECRETS_TEST_VALUES: JSON.stringify({ shitrat_github_app_id: "123", shitrat_github_private_key: privateKey, shitrat_github_client_id: "fixture-client", shitrat_github_installations_json: '{"example":123}' }) } : {}),
         ...(!input.missingIdentity ? { SC_IDENTITY_JSON: identity } : {}),
         ...(identityFile ? { SHITRAT_CELL_IDENTITY_FILE: identityFile } : {}),
         ...(input.identityFixture === "foreign-owner" ? { CELL_TEST_FOREIGN_OWNER_FILE: identityFile } : {}),
         ...(!input.missingDocument ? { SHITRAT_CELL_CALLER_DOCUMENT_FILE: documentFile } : {}),
-        ...(!input.config || input.config === "override" ? { SHITRAT_SC_BIN: input.oldClient ? process.env.SHITRAT_TEST_OLD_SC_BIN : input.unavailableClient ? path.join(home, "missing-sc") : selectedClient } : {}),
+        ...(!input.config || input.config === "override" || input.forceFakeClient ? { SHITRAT_SC_BIN: input.oldClient ? process.env.SHITRAT_TEST_OLD_SC_BIN : input.unavailableClient ? path.join(home, "missing-sc") : selectedClient } : {}),
         SC_FORWARD_NONCE: "inherited-nonce-must-be-replaced-not-forwarded",
         ...(input.parentCredentials ? { SC_PASS_FILE: path.join(home, "parent-pass"), SHITRAT_PUSH_TOKEN: "inherited-fixture-token", SHITRAT_GITHUB_TOKEN: "inherited-fixture-token", GITHUB_TOKEN: "inherited-fixture-token", GH_TOKEN: "inherited-fixture-token" } : {}),
         CELL_TEST_NONCES: path.join(home, "nonces"), CELL_TEST_FORWARD_REQUESTS: path.join(home, "forward-requests"),
@@ -184,12 +204,13 @@ const scenario = async (input: {
         CELL_TEST_GIT_ARGS: JSON.stringify(args), CELL_TEST_GIT_CWD: path.join(home, "local"),
         ...(input.git && (input.config === "missing" || input.refusal) ? { CELL_TEST_DIRECT_GIT_REMOTE: path.join(home, "example/project.git") } : {}),
         CELL_TEST_GIT_CHILDREN: path.join(home, "git-children"),
-        CELL_TEST_ALL_GIT_CHILDREN: path.join(home, "all-git-children"),
-        ...(input.gitTracing ? { GIT_TRACE: "1", GIT_TRACE_CURL: "1", GIT_TRACE_PACKET: "1", GIT_CURL_VERBOSE: "1", GIT_REDACT_COOKIES: "fixture", GIT_TRACE2_EVENT: path.join(home, "git-trace") } : {}),
+        CELL_TEST_ALL_GIT_CHILDREN: path.join(home, "all-git-children"), CELL_TEST_GROUP_KILLS: path.join(home, "lease-group-kills"),
+        ...(input.gitTracing ? { GIT_CONFIG_PARAMETERS: "'core.quotePath=true'", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.quotePath", GIT_CONFIG_VALUE_0: "true", GIT_CONFIG_KEY_99: "inherited-fixture-config", GIT_CONFIG_VALUE_99: "inherited-fixture-config", GIT_TRACE: "1", GIT_TRACE_CURL: "1", GIT_TRACE_PACKET: "1", GIT_CURL_VERBOSE: "1", GIT_REDACT_COOKIES: "fixture", GIT_TRACE2_EVENT: path.join(home, "git-trace") } : {}),
       },
       stdout: "pipe", stderr: "pipe",
     })
     const [stdout, stderr, exit] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+    expect(await readOrEmpty(path.join(home, "secrets-decoy"))).toBe("")
     const argv = await readOrEmpty(path.join(home, "argv"))
     for (const secret of [privateKey, signing.d!, "FAKE-INSTALLATION-TOKEN", identity]) expect(stdout + stderr + argv).not.toContain(secret)
     const nonces: NonceRecord[] = (await readOrEmpty(path.join(home, "nonces"))).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
@@ -215,7 +236,7 @@ const scenario = async (input: {
       }
     }
     for (const request of forwardRequests) expect(request.token).toBe(request.nonce)
-    return { stdout, stderr, exit, argv, allGitChildren: (await readOrEmpty(path.join(home, "all-git-children"))).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)), leaseEnv: (await readOrEmpty(path.join(home, "lease-env"))).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)), leases: await readOrEmpty(path.join(home, "leases")), nonces: nonces.filter((record) => record.command === "forward"), probes: nonces.filter((record) => record.command === "capabilities").length, forwardRequests, gitChildren, gitTrace, direct: await readOrEmpty(path.join(home, "direct")), seen }
+    return { stdout, stderr, exit, argv, groupKills: (await readOrEmpty(path.join(home, "lease-group-kills"))).trim().split("\n").filter(Boolean), allGitChildren: (await readOrEmpty(path.join(home, "all-git-children"))).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)), leaseEnv: (await readOrEmpty(path.join(home, "lease-env"))).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)), leases: await readOrEmpty(path.join(home, "leases")), nonces: nonces.filter((record) => record.command === "forward"), probes: nonces.filter((record) => record.command === "capabilities").length, forwardRequests, gitChildren, gitTrace, direct: await readOrEmpty(path.join(home, "direct")), seen }
   }
   try {
     if (input.git) return await input.git(home, run)
@@ -225,10 +246,91 @@ const scenario = async (input: {
     await rm(home, { recursive: true, force: true })
   }
 }
-type Result = { allGitChildren: GitChild[]; leaseEnv: string[][]; leases: string; stdout: string; stderr: string; exit: number; argv: string; nonces: NonceRecord[]; probes: number; forwardRequests: ForwardRequest[]; gitChildren: GitChild[]; gitTrace: string; direct: string; seen: Seen[] }
+type Result = { groupKills: string[]; allGitChildren: GitChild[]; leaseEnv: string[][]; leases: string; stdout: string; stderr: string; exit: number; argv: string; nonces: NonceRecord[]; probes: number; forwardRequests: ForwardRequest[]; gitChildren: GitChild[]; gitTrace: string; direct: string; seen: Seen[] }
 
 describe("GitHub cell route", () => {
-  for (const trustFailure of ["sc-mode", "sc-link", "sc-parent", "secrets-mode", "secrets-path"] as const) test(`auto refuses untrusted executable ${trustFailure} before leasing`, async () => {
+  const trustDriver = async (mode: string, target: string | undefined, cwd: string, searchPath: string) => {
+    const proc = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures/executable-trust-driver.ts"), mode, ...(target === undefined ? [] : [target])], {
+      cwd, env: { PATH: searchPath, HOME: cwd }, stdout: "pipe", stderr: "pipe",
+    })
+    const [stdout, stderr, exit] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+    expect(exit).toBe(0)
+    expect(stderr).toBe("")
+    return JSON.parse(stdout)
+  }
+  test("executable trust checks the grandparent and rejects a foreign uid", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "shitrat-trust-"))
+    try {
+      const grandparent = path.join(root, "ancestor")
+      const parent = path.join(grandparent, "parent")
+      await mkdir(parent, { recursive: true })
+      const binary = path.join(parent, "tool")
+      await writeFile(binary, "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+      expect(trustedExecutable(binary)).toBe(await realpath(binary))
+      const foreign = await trustDriver("foreign-owner", binary, root, process.env.PATH ?? "")
+      expect(foreign.ok).toBe(false)
+      expect(foreign.message).toContain("target owner must be root or the current uid")
+      expect(foreign.path).toBe(await realpath(binary))
+      await chmod(grandparent, 0o777)
+      expect(() => trustedExecutable(binary)).toThrow("ancestor must not be group or world writable")
+      await chmod(grandparent, 0o1777)
+      // Sticky is not an exemption for a non-root owner.
+      if (process.getuid?.() !== 0) expect(() => trustedExecutable(binary)).toThrow("sticky and root owned")
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+  test("secrets PATH ignores relative and empty entries and refuses an absolute checkout resolution", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "shitrat-path-"))
+    try {
+      const repo = path.join(root, "repo")
+      const tools = path.join(root, "tools")
+      await mkdir(path.join(repo, "relative"), { recursive: true })
+      await mkdir(tools)
+      for (const file of [path.join(repo, "secrets"), path.join(repo, "relative/secrets"), path.join(tools, "secrets")]) {
+        await writeFile(file, `#!${process.execPath}\nawait Bun.write(${JSON.stringify(path.join(root, "decoy-ran"))}, "ran");\n`, { mode: 0o755 })
+      }
+      const allowed = await trustDriver("resolve", undefined, repo, `.:relative::${tools}`)
+      expect(allowed).toEqual({ ok: true, result: await realpath(path.join(tools, "secrets")) })
+      const denied = await trustDriver("resolve", undefined, repo, repo)
+      expect(denied).toMatchObject({ ok: false, code: "UNTRUSTED_SECRETS_EXECUTABLE" })
+      expect(denied.message).toContain("outside the current working directory")
+      for (const mode of ["required", "optional", "write"]) {
+        const absent = await trustDriver(mode, undefined, repo, ".:relative:")
+        expect(absent).toMatchObject({ ok: false, code: "UNTRUSTED_SECRETS_EXECUTABLE" })
+        expect(absent.message).toContain("untrusted secrets executable")
+        expect(absent.message).toContain("absolute PATH entries")
+        const unsafe = await trustDriver(mode, undefined, repo, repo)
+        expect(unsafe).toMatchObject({ ok: false, code: "UNTRUSTED_SECRETS_EXECUTABLE" })
+        expect(unsafe.message).toContain(await realpath(path.join(repo, "secrets")))
+        expect(unsafe.message).toContain("outside the current working directory")
+      }
+      expect(await readOrEmpty(path.join(root, "decoy-ran"))).toBe("")
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+  test("direct CLI reports executable trust failure rather than a missing secret", async () => {
+    const result = await scenario({ via: "direct", noAppEnv: true, trustFailure: "secrets-path", cli: true })
+    expect(result.exit).toBe(1)
+    const envelope = JSON.parse(result.stdout)
+    expect(envelope.error.code).toBe("UNTRUSTED_SECRETS_EXECUTABLE")
+    expect(envelope.error.message).toContain("untrusted secrets executable")
+    expect(envelope.error.message).toContain("ancestor must not be group or world writable")
+    expect(result.leases).toBe("")
+  })
+  test("Git drops inherited config and identity-file paths but keeps invocation config", () => {
+    const original = process.env
+    try {
+      process.env = { ...original, SHITRAT_CELL_IDENTITY_FILE: "/synthetic/identity", GIT_CONFIG_PARAMETERS: "'trace2.eventTarget=unsafe'", GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "trace2.eventTarget", GIT_CONFIG_VALUE_0: "unsafe", GIT_CONFIG_KEY_1: "core.quotePath", GIT_CONFIG_VALUE_1: "true" }
+      const plain = gitEnvironment()
+      for (const key of ["SHITRAT_CELL_IDENTITY_FILE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"]) expect(plain[key]).toBeUndefined()
+      const scoped = gitEnvironment({ GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: "synthetic-scoped-header" })
+      expect(scoped.GIT_CONFIG_COUNT).toBe("1")
+      expect(scoped.GIT_CONFIG_KEY_0).toBe("http.extraHeader")
+      expect(scoped.GIT_CONFIG_VALUE_0).toBe("synthetic-scoped-header")
+      expect(scoped.GIT_CONFIG_KEY_1).toBeUndefined()
+      expect(scoped.GIT_CONFIG_PARAMETERS).toBeUndefined()
+      expect(scoped.SHITRAT_CELL_IDENTITY_FILE).toBeUndefined()
+    } finally { process.env = original }
+  })
+  for (const trustFailure of ["sc-mode", "sc-link", "sc-parent", "sc-link-parent", "secrets-mode", "secrets-path"] as const) test(`auto refuses untrusted executable ${trustFailure} before leasing`, async () => {
     const result = await scenario({ config: "file", trustFailure, secretsConfig: trustFailure === "secrets-mode", missingIdentity: true, lease: "ok" })
     expect(result.exit).toBe(0)
     expect(result.leases).toBe("")
@@ -242,7 +344,10 @@ describe("GitHub cell route", () => {
     expect(result.leaseEnv).toHaveLength(1)
     expect(result.leaseEnv[0]).toContain("PATH")
     expect(result.leaseEnv[0]).toContain("HOME")
-    expect(result.leaseEnv[0]!.every((key) => key === "PATH" || key === "HOME" || key.startsWith("AGENT_SECRETS") || key.startsWith("XDG"))).toBe(true)
+    expect(result.leaseEnv[0]).toContain("OTEL_EMIT_ENDPOINT")
+    expect(result.leaseEnv[0]).toContain("OTEL_EMIT_TOKEN")
+    expect(result.leaseEnv[0]!.every((key) => key === "PATH" || key === "HOME" || key.startsWith("AGENT_SECRETS") || key.startsWith("XDG") || key.startsWith("OTEL_EMIT_"))).toBe(true)
+    expect(result.groupKills).toEqual([])
   })
   for (const noName of [false, true]) test(`auto App-wide installations uses direct once without an identity lease (no name=${noName})`, async () => {
     const result = await scenario({ noName, config: "file", missingIdentity: true, noAppEnv: true, cli: true, cliArgs: ["installations"] })
@@ -265,6 +370,7 @@ describe("GitHub cell route", () => {
     const start = performance.now()
     const result = await scenario({ config: "file", missingIdentity: true, lease: "ok", leaseGrandchild: true })
     expect(performance.now() - start).toBeLessThan(14_000)
+    expect(result.groupKills).toHaveLength(1)
     expect(result.exit).toBe(0)
     expect(result.argv).toBe("")
     expect(result.stderr).toBe('{"event":"github-route","path":"direct","reason":"cell-configuration"}\n')
@@ -455,8 +561,11 @@ describe("GitHub cell route", () => {
     expect(result.stderr).not.toContain('"path":"direct"')
   })
   test("explicit cell ignores auto config and fails closed without env", async () => {
-    const result = await scenario({ via: "cell", config: "file", missingIdentity: true })
+    const result = await scenario({ via: "cell", config: "file", missingIdentity: true, forceFakeClient: true })
     expect(result.exit).toBe(1)
+    expect(result.probes).toBe(1)
+    expect(result.argv).toContain('"--capabilities"')
+    expect(result.argv).not.toContain('"describe"')
     expect(result.leases).toBe("")
     expect(result.direct).toBe("")
   })
@@ -795,7 +904,7 @@ describe("GitHub cell route", () => {
     expect(result.stderr).not.toContain('"path":"direct"')
   })
   for (const mode of ["fallback-configuration", "fallback-forward-start"]) test(`${mode} still permits explicit setup fallback`, async () => {
-    const result = await scenario({ fallback: "direct", mode, ...(mode === "fallback-forward-start" ? { forwardFailure: true } : {}) })
+    const result = await scenario({ via: "cell", fallback: "direct", mode, ...(mode === "fallback-forward-start" ? { forwardFailure: true } : {}) })
     expect(result.exit).toBe(0)
     expect(JSON.parse(result.stdout)).toEqual({ directCalls: 1 })
     expect(result.seen).toEqual([])
@@ -935,6 +1044,8 @@ describe("GitHub cell route", () => {
         expect(child.identityPresent).toBe(false)
         expect(child.privateKeyPresent).toBe(false)
         expect(child.passPresent).toBe(false)
+        expect(child.identityFilePresent).toBe(false)
+        expect(child.inheritedConfigPresent).toBe(false)
         expect(child.inheritedTokenPresent).toBe(false)
         expect(child.nonceEnv).toBeNull()
         expect(child.traceKeys).toEqual([])

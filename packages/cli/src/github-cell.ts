@@ -123,10 +123,11 @@ const autoClientConfiguration = async (): Promise<ClientConfiguration> => {
         env: leaseEnvironment(), detached: true, stdin: "ignore", stdout: "pipe", stderr: "ignore",
       })
       let timer: ReturnType<typeof setTimeout> | undefined
+      let timedOut = false
       try {
         const [value, exit] = await Promise.race([
           Promise.all([new Response(proc.stdout).text(), proc.exited]),
-          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new GitHubCellError("configuration")), 10_000) }),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => { timedOut = true; reject(new GitHubCellError("configuration")) }, 10_000) }),
         ])
         if (exit !== 0 || !value.trim()) throw new GitHubCellError("configuration")
         identity = value.trim()
@@ -134,7 +135,9 @@ const autoClientConfiguration = async (): Promise<ClientConfiguration> => {
         clearTimeout(timer)
         // A grandchild may outlive the lease executable while holding stdout.
         // Kill only this detached, owned process group; never wait on that pipe.
-        try { process.kill(-proc.pid, "SIGKILL") } catch { try { proc.kill("SIGKILL") } catch { /* Already exited. */ } }
+        if (timedOut || proc.exitCode === null) {
+          try { process.kill(-proc.pid, "SIGKILL") } catch { try { proc.kill("SIGKILL") } catch { /* Already exited. */ } }
+        }
       }
     }
     const document = process.env.SHITRAT_CELL_CALLER_DOCUMENT_FILE

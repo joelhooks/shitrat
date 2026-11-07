@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import { secretsExecutable } from "./executable-trust.js"
+import { secretsExecutable, UntrustedSecretsExecutableError } from "./executable-trust.js"
 import { leaseEnvironment } from "./child-environment.js"
 
 export class MissingSecretError extends Error {
@@ -18,8 +18,7 @@ const readEnv = (secretName: string): string | undefined => {
 }
 
 const leaseWithAgentSecrets = (secretName: string): string | undefined => {
-  let bin: string
-  try { bin = secretsExecutable() } catch { return undefined }
+  const bin = secretsExecutable()
   const proc = Bun.spawnSync([bin, "lease", secretName], {
     env: leaseEnvironment(), stdout: "pipe", stderr: "pipe",
   })
@@ -30,15 +29,20 @@ const leaseWithAgentSecrets = (secretName: string): string | undefined => {
   return value.length > 0 ? value : undefined
 }
 
-export const readSecret = (secretName: string): Effect.Effect<string, MissingSecretError> =>
-  Effect.sync(() => readEnv(secretName) ?? leaseWithAgentSecrets(secretName)).pipe(
+const readValue = (secretName: string) => Effect.try({
+  try: () => readEnv(secretName) ?? leaseWithAgentSecrets(secretName),
+  catch: (error) => error instanceof UntrustedSecretsExecutableError ? error : new MissingSecretError(secretName),
+})
+
+export const readSecret = (secretName: string): Effect.Effect<string, MissingSecretError | UntrustedSecretsExecutableError> =>
+  readValue(secretName).pipe(
     Effect.flatMap((value) =>
       value ? Effect.succeed(value) : Effect.fail(new MissingSecretError(secretName)),
     ),
   )
 
-export const readOptionalSecret = (secretName: string): Effect.Effect<string | undefined> =>
-  Effect.sync(() => readEnv(secretName) ?? leaseWithAgentSecrets(secretName))
+export const readOptionalSecret = (secretName: string): Effect.Effect<string | undefined, MissingSecretError | UntrustedSecretsExecutableError> =>
+  readValue(secretName)
 
 export class SecretWriteError extends Error {
   readonly code = "SECRET_WRITE_FAILED"
@@ -50,8 +54,7 @@ export class SecretWriteError extends Error {
 // The value goes in on stdin, never argv, and is read back from the store
 // (not the env override) to prove the write landed.
 export const writeAgentSecret = (secretName: string, value: string): void => {
-  let bin: string
-  try { bin = secretsExecutable() } catch { throw new SecretWriteError(secretName, "untrusted secrets executable") }
+  const bin = secretsExecutable()
   const run = (verb: "update" | "add") =>
     Bun.spawnSync([bin, verb, secretName], {
       env: leaseEnvironment(),

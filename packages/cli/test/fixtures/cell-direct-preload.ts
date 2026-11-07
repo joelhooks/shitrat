@@ -44,6 +44,12 @@ if (process.env.CELL_TEST_CLI_ENVELOPE_DEFECT === "1") {
   })
 }
 
+const kill = process.kill.bind(process)
+process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+  if (pid < 0 && process.env.CELL_TEST_GROUP_KILLS) appendFileSync(process.env.CELL_TEST_GROUP_KILLS, `${pid}\n`)
+  return kill(pid, signal)
+}) as typeof process.kill
+
 const spawn = Bun.spawn
 Bun.spawn = ((...args: Parameters<typeof Bun.spawn>) => {
   const [command, options] = args
@@ -58,6 +64,8 @@ Bun.spawn = ((...args: Parameters<typeof Bun.spawn>) => {
       args: command, nonceEnv: env.SC_FORWARD_NONCE ?? null, identityPresent: !!env.SC_IDENTITY_JSON,
       privateKeyPresent: !!env.SHITRAT_GITHUB_PRIVATE_KEY,
       passPresent: !!env.SC_PASS_FILE,
+      identityFilePresent: !!env.SHITRAT_CELL_IDENTITY_FILE,
+      inheritedConfigPresent: !!env.GIT_CONFIG_PARAMETERS || Object.entries(env).some(([key, value]) => (key.startsWith("GIT_CONFIG_KEY_") || key.startsWith("GIT_CONFIG_VALUE_")) && value === "inherited-fixture-config"),
       inheritedTokenPresent: [env.SHITRAT_PUSH_TOKEN, env.SHITRAT_GITHUB_TOKEN, env.GITHUB_TOKEN, env.GH_TOKEN].includes("inherited-fixture-token"),
       traceKeys: Object.keys(env).filter((key) => key.startsWith("GIT_TRACE") || key === "GIT_CURL_VERBOSE" || key === "GIT_REDACT_COOKIES"),
     })}\n`)
