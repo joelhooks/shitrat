@@ -32,6 +32,8 @@ import {
 } from "../public-push-guard.js"
 import { attestPushedSha, withAttest } from "../attest.js"
 import { GitHubCellError, isCellPlaceholder } from "../github-cell.js"
+import { gitEnvironment } from "../child-environment.js"
+import { UntrustedSecretsExecutableError } from "../executable-trust.js"
 import { CiReadError, isFailingRun, readChecks, readJobLog, readPullRequestStatus, rerunWorkflowRun } from "../ci-reads.js"
 import { labelIssue, setCommitStatus } from "../labels-statuses.js"
 import { createAnnotatedTag, createGitHubRelease, GitHubReleaseError } from "../github-releases.js"
@@ -264,6 +266,10 @@ const printFailure = (
     if (cause instanceof GitHubCellError) {
       const envelope = failure(command, cause.message, cause.code, fix, nextActions)
       yield* Console.log(json({ ...envelope, error: { ...envelope.error, reason: cause.reason } }))
+      return
+    }
+    if (cause instanceof UntrustedSecretsExecutableError) {
+      yield* Console.log(json(failure(command, cause.message, cause.code, "Install secrets in an absolute PATH directory; fix executable and ancestor ownership and permissions.", nextActions)))
       return
     }
     seen.add(cause)
@@ -626,7 +632,7 @@ const runGitDetailed = async (
 ): Promise<{ readonly stdout: string; readonly stderr: string }> => {
   const proc = Bun.spawn(["git", ...args], {
     cwd: options.cwd,
-    env: { ...process.env, ...options.env },
+    env: gitEnvironment(options.env),
     stdout: "pipe",
     stderr: "pipe",
   })

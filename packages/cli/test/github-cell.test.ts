@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test"
 import { createPublicKey, generateKeyPairSync, verify } from "node:crypto"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { gitEnvironment } from "../src/child-environment.js"
+import { trustedExecutable } from "../src/executable-trust.js"
 import { buildCellGitInvocation } from "../src/git-push.js"
+import { deriveCallerDocument, verifyCallerDocument, verifyProtectedFile } from "../src/github-cell.js"
 
 const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } })
 const signing = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey.export({ format: "jwk" })
@@ -11,12 +14,27 @@ const identity = JSON.stringify({ did: "did:web:fixture.example.invalid", signin
 const fixture = path.join(import.meta.dir, "fixtures/cell-client.ts")
 const readOrEmpty = async (file: string) => readFile(file, "utf8").catch(() => "")
 type Seen = { method: string; path: string; search: string; authorization: string | null; auth: string | null; body: Buffer }
-type NonceRecord = { command: string; nonce: string | null }
+type NonceRecord = { command: string; nonce: string | null; identityPresent: boolean; privateKeyPresent: boolean }
 type ForwardRequest = { token: string; nonce: string }
-type GitChild = { args: string[]; nonceEnv: string | null; traceKeys: string[] }
+type GitChild = { args: string[]; nonceEnv: string | null; traceKeys: string[]; identityPresent: boolean; privateKeyPresent: boolean; passPresent?: boolean; inheritedTokenPresent?: boolean; identityFilePresent?: boolean; inheritedConfigPresent?: boolean }
 
 const scenario = async (input: {
   via?: string
+  noName?: boolean
+  nameOff?: boolean
+  config?: "file" | "override" | "missing" | "malformed" | "relative-bin"
+  configMode?: number
+  configSymlink?: boolean
+  secretsConfig?: boolean
+  trustFailure?: "sc-mode" | "sc-link" | "sc-parent" | "sc-link-parent" | "secrets-mode" | "secrets-path"
+  leaseGrandchild?: boolean
+  describeHang?: boolean
+  noAppEnv?: boolean
+  parentCredentials?: boolean
+  forceFakeClient?: boolean
+  identityFixture?: "secure" | "insecure" | "symlink" | "foreign-owner"
+  lease?: "ok" | "refused" | "invalid"
+  unreachable?: boolean
   fallback?: string
   refusal?: boolean
   fetchRefusal?: boolean
@@ -25,9 +43,11 @@ const scenario = async (input: {
   missingIdentity?: boolean
   identityFile?: string
   cli?: boolean
+  pushCli?: boolean
   cliArgs?: string[]
   runnerFailure?: { status: number; headers?: Record<string, string>; message: string }
   forwardFailure?: boolean
+  failureEnvelope?: boolean
   unavailableClient?: boolean
   gitTracing?: boolean
   capability?: "old" | "garbage" | "timeout" | "missing" | "false" | "extra"
@@ -41,6 +61,43 @@ const scenario = async (input: {
   // The probe has no inherited test hooks; the fake executable owns its fixture
   // configuration, just as a real executable owns its capability implementation.
   await writeFile(client, `#!${process.execPath}\nprocess.env.CELL_TEST_ARGV = ${JSON.stringify(path.join(home, "argv"))};\nprocess.env.CELL_TEST_NONCES = ${JSON.stringify(path.join(home, "nonces"))};\nprocess.env.CELL_TEST_CAPABILITY_MODE = ${JSON.stringify(input.capability ?? "supported")};\nawait import(${JSON.stringify(fixture)});\n`, { mode: 0o755 })
+  const binDir = path.join(home, "bin")
+  await mkdir(binDir)
+  // Synthetic secrets remain in env/stdout, never in fixture files or argv.
+  let secretsBin = path.join(binDir, "secrets")
+  await writeFile(secretsBin, `#!${process.execPath}\nimport { appendFile } from "node:fs/promises";\nawait appendFile(${JSON.stringify(path.join(home, "leases"))}, JSON.stringify(process.argv.slice(2)) + "\\n");\nawait appendFile(${JSON.stringify(path.join(home, "lease-env"))}, JSON.stringify(Object.keys(process.env)) + "\\n");\n${input.leaseGrandchild ? `Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 60000)"], { stdin: "ignore", stdout: "inherit", stderr: "ignore" });` : ""}\nconst values = JSON.parse(process.env.AGENT_SECRETS_TEST_VALUES ?? "{}");\nprocess.stdout.write(process.argv[3]?.startsWith("rat_king_fleet_agent_") ? process.env.AGENT_SECRETS_TEST_LEASE_VALUE ?? "" : values[process.argv[3]] ?? ""); process.exit(${input.lease === "refused" ? 1 : 0});\n`, { mode: 0o755 })
+  if (input.secretsConfig) {
+    const configuredDir = path.join(home, "configured-tools")
+    await mkdir(configuredDir)
+    const configured = path.join(configuredDir, "secrets")
+    await copyFile(secretsBin, configured)
+    await writeFile(secretsBin, `#!${process.execPath}\nimport { appendFileSync } from "node:fs"; appendFileSync(${JSON.stringify(path.join(home, "secrets-decoy"))}, "ran\\n"); process.exit(1);\n`)
+    secretsBin = configured
+  }
+  const useFakeClient = !!(input.forwardFailure || input.capability || input.mode?.startsWith("nonce-") || input.describeHang || input.trustFailure || input.forceFakeClient)
+  let selectedClient = useFakeClient ? client : process.env.SHITRAT_TEST_SC_BIN ?? client
+  if (input.trustFailure === "sc-mode" || input.trustFailure === "sc-link") await chmod(client, 0o777)
+  if (input.trustFailure === "sc-parent") await chmod(home, 0o777)
+  if (input.trustFailure === "sc-link") { selectedClient = path.join(home, "sc-link"); await symlink(client, selectedClient) }
+  if (input.trustFailure === "sc-link-parent") {
+    const targetDir = path.join(home, "unsafe-target")
+    await mkdir(targetDir, { mode: 0o777 })
+    await chmod(targetDir, 0o777)
+    const target = path.join(targetDir, "sc")
+    await copyFile(client, target)
+    selectedClient = path.join(home, "safe-link")
+    await symlink(target, selectedClient)
+  }
+  if (input.trustFailure === "secrets-mode") await chmod(secretsBin, 0o777)
+  if (input.trustFailure === "secrets-path") await chmod(binDir, 0o777)
+  let identityFile = input.identityFile
+  if (input.identityFixture) {
+    const target = path.join(home, "identity.json")
+    await writeFile(target, identity, { mode: input.identityFixture === "insecure" ? 0o644 : 0o600 })
+    identityFile = target
+    if (input.identityFixture === "symlink") { identityFile = path.join(home, "identity-link.json"); await symlink(target, identityFile) }
+  }
+  const configFile = input.config === "override" ? path.join(home, "custom-cell.json") : path.join(home, ".config/shitrat/cell.json")
   const documentFile = path.join(home, "caller-public.json")
   const did = "did:web:fixture.example.invalid"
   await writeFile(documentFile, JSON.stringify({
@@ -54,7 +111,7 @@ const scenario = async (input: {
     async fetch(request) {
       const url = new URL(request.url)
       expect(request.headers.has("x-sc-forward-token")).toBe(false)
-      if (process.env.SHITRAT_TEST_SC_BIN && !input.forwardFailure && !input.capability && !input.mode?.startsWith("nonce-")) {
+      if (process.env.SHITRAT_TEST_SC_BIN && selectedClient === process.env.SHITRAT_TEST_SC_BIN) {
         const token = request.headers.get("x-sc-auth") ?? ""
         const [header, payload, signature] = token.split(".")
         expect(header && payload && signature).toBeTruthy()
@@ -100,9 +157,16 @@ const scenario = async (input: {
         return Response.json({ total_count: 2, workflow_runs: [{ id: (status === "queued" ? 0 : 10) + page }] }, { headers: next })
       }
       if (apiPath.endsWith("/jobs")) return Response.json({ total_count: 2, jobs: [{ id: page, name: "build", status: "queued", labels: ["self-hosted", "linux", "pool-a"], runner_name: "runner-1", runner_group_name: "pool-a", created_at: "2026-01-01T00:00:00Z", started_at: null }] }, { headers })
-      return Response.json({ full_name: "example/project", cell: true })
+      return Response.json({ full_name: "example/project", cell: true, ...(input.pushCli ? { private: true } : {}) })
     },
   })
+  if (input.config === "file" || input.config === "override" || input.config === "malformed" || input.config === "relative-bin") {
+    await mkdir(path.dirname(configFile), { recursive: true })
+    const target = input.configSymlink ? `${configFile}.target` : configFile
+    await writeFile(target, input.config === "malformed" ? "not JSON" : JSON.stringify(input.config === "override" ? { url: "http://127.0.0.1:1", audience: "wrong-audience", scBin: "missing-sc" } : { url: server.url.origin, audience: "did:web:cell.example.invalid", scBin: input.config === "relative-bin" ? "sc" : selectedClient, ...(input.secretsConfig ? { secretsBin } : {}) }), { mode: input.configMode ?? 0o600 })
+    if (input.configMode !== undefined) await chmod(target, input.configMode)
+    if (input.configSymlink) await symlink(target, configFile)
+  }
   const run = async (args: string[] = []): Promise<Result> => {
     const nodeModule = path.join(home, "github-cell.mjs")
     if (input.mode === "no-bun") {
@@ -110,39 +174,57 @@ const scenario = async (input: {
       expect(build.success).toBe(true)
       await writeFile(nodeModule, await build.outputs[0]!.text())
     }
-    const proc = Bun.spawn(input.mode === "no-bun" ? ["node", path.join(import.meta.dir, "fixtures/cell-node-driver.mjs"), nodeModule] : [process.execPath, "--preload", path.join(import.meta.dir, "fixtures/cell-direct-preload.ts"), ...(input.cli ? [path.join(import.meta.dir, "../src/cli.ts"), ...(input.cliArgs ?? ["status", "example/project"])] : [path.join(import.meta.dir, input.mode === "dead-forward" ? "fixtures/cell-dead-forward-driver.ts" : "fixtures/cell-driver.ts"), input.mode ?? "repo"])], {
+    const proc = Bun.spawn(input.mode === "no-bun" ? ["node", path.join(import.meta.dir, "fixtures/cell-node-driver.mjs"), nodeModule] : [process.execPath, "--preload", path.join(import.meta.dir, "fixtures/cell-direct-preload.ts"), ...(input.cli || input.pushCli ? [path.join(import.meta.dir, "../src/cli.ts"), ...(input.pushCli ? ["push", "example/project", "--repo-dir", path.join(home, "local"), "--allow-any-author", "--dry-run"] : input.cliArgs ?? ["status", "example/project"])] : [path.join(import.meta.dir, input.mode === "dead-forward" ? "fixtures/cell-dead-forward-driver.ts" : "fixtures/cell-driver.ts"), input.mode ?? "repo"])], {
       env: {
-        PATH: process.env.PATH, HOME: home,
-        SC_URL: server.url.origin, SC_AUDIENCE: "did:web:cell.example.invalid",
+        PATH: `${binDir}:${process.env.PATH}`, HOME: home,
+        ...(!input.noName ? { RATKING_NAME: input.nameOff ? "off" : "fixture/agent" } : {}),
+        ...(!input.config || input.config === "override" ? { SC_URL: input.unreachable ? "http://127.0.0.1:1" : server.url.origin, SC_AUDIENCE: "did:web:cell.example.invalid" } : {}),
+        ...(input.config === "override" ? { SHITRAT_CELL_CONFIG: configFile } : {}),
+        OTEL_EMIT_ENDPOINT: "https://telemetry.example.invalid", OTEL_EMIT_TOKEN: "synthetic-telemetry-token",
+        ...(input.lease ? { AGENT_SECRETS_TEST_LEASE_VALUE: input.lease === "invalid" ? "invalid-identity" : identity } : {}),
+        ...(input.noAppEnv ? { AGENT_SECRETS_TEST_VALUES: JSON.stringify({ shitrat_github_app_id: "123", shitrat_github_private_key: privateKey, shitrat_github_client_id: "fixture-client", shitrat_github_installations_json: '{"example":123}' }) } : {}),
         ...(!input.missingIdentity ? { SC_IDENTITY_JSON: identity } : {}),
-        ...(input.identityFile ? { SHITRAT_CELL_IDENTITY_FILE: input.identityFile } : {}),
+        ...(identityFile ? { SHITRAT_CELL_IDENTITY_FILE: identityFile } : {}),
+        ...(input.identityFixture === "foreign-owner" ? { CELL_TEST_FOREIGN_OWNER_FILE: identityFile } : {}),
         ...(!input.missingDocument ? { SHITRAT_CELL_CALLER_DOCUMENT_FILE: documentFile } : {}),
-        SHITRAT_SC_BIN: input.oldClient ? process.env.SHITRAT_TEST_OLD_SC_BIN : input.unavailableClient ? path.join(home, "missing-sc") : input.forwardFailure || input.capability || input.mode?.startsWith("nonce-") ? client : process.env.SHITRAT_TEST_SC_BIN ?? client,
+        ...(!input.config || input.config === "override" || input.forceFakeClient ? { SHITRAT_SC_BIN: input.oldClient ? process.env.SHITRAT_TEST_OLD_SC_BIN : input.unavailableClient ? path.join(home, "missing-sc") : selectedClient } : {}),
         SC_FORWARD_NONCE: "inherited-nonce-must-be-replaced-not-forwarded",
+        ...(input.parentCredentials ? { SC_PASS_FILE: path.join(home, "parent-pass"), SHITRAT_PUSH_TOKEN: "inherited-fixture-token", SHITRAT_GITHUB_TOKEN: "inherited-fixture-token", GITHUB_TOKEN: "inherited-fixture-token", GH_TOKEN: "inherited-fixture-token" } : {}),
         CELL_TEST_NONCES: path.join(home, "nonces"), CELL_TEST_FORWARD_REQUESTS: path.join(home, "forward-requests"),
+        ...(process.env.SHITRAT_TEST_SC_BIN ? { CELL_TEST_REAL_SC_BIN: process.env.SHITRAT_TEST_SC_BIN } : {}),
         ...(input.mode === "nonce-refusal" ? { CELL_TEST_NONCE_REFUSAL: "1" } : {}),
         ...(input.mode === "nonce-echo" ? { CELL_TEST_ECHO_NONCE: "1" } : {}),
         ...(input.forwardFailure ? { CELL_TEST_FORWARD_FAIL: "1" } : {}),
+        ...(input.describeHang ? { CELL_TEST_DESCRIBE_HANG: "1" } : {}),
+        ...(input.failureEnvelope ? { CELL_TEST_CLI_ENVELOPE_DEFECT: "1" } : {}),
         ...(input.via ? { SHITRAT_GITHUB_VIA: input.via } : {}),
         ...(input.fallback ? { SHITRAT_GITHUB_CELL_FALLBACK: input.fallback } : {}),
-        SHITRAT_GITHUB_APP_ID: "123", SHITRAT_GITHUB_PRIVATE_KEY: privateKey, SHITRAT_GITHUB_CLIENT_ID: "fixture-client", SHITRAT_GITHUB_INSTALLATIONS_JSON: '{"example":123}',
+        ...(!input.noAppEnv ? { SHITRAT_GITHUB_APP_ID: "123", SHITRAT_GITHUB_PRIVATE_KEY: privateKey, SHITRAT_GITHUB_CLIENT_ID: "fixture-client", SHITRAT_GITHUB_INSTALLATIONS_JSON: '{"example":123}' } : {}),
         CELL_TEST_DIRECT: path.join(home, "direct"), CELL_TEST_ARGV: path.join(home, "argv"),
         CELL_TEST_GIT_ARGS: JSON.stringify(args), CELL_TEST_GIT_CWD: path.join(home, "local"),
+        ...(input.git && (input.config === "missing" || input.refusal) ? { CELL_TEST_DIRECT_GIT_REMOTE: path.join(home, "example/project.git") } : {}),
         CELL_TEST_GIT_CHILDREN: path.join(home, "git-children"),
-        ...(input.gitTracing ? { GIT_TRACE: "1", GIT_TRACE_CURL: "1", GIT_TRACE_PACKET: "1", GIT_CURL_VERBOSE: "1", GIT_REDACT_COOKIES: "fixture", GIT_TRACE2_EVENT: path.join(home, "git-trace") } : {}),
+        CELL_TEST_ALL_GIT_CHILDREN: path.join(home, "all-git-children"), CELL_TEST_GROUP_KILLS: path.join(home, "lease-group-kills"),
+        ...(input.gitTracing ? { GIT_CONFIG_PARAMETERS: "'core.quotePath=true'", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.quotePath", GIT_CONFIG_VALUE_0: "true", GIT_CONFIG_KEY_99: "inherited-fixture-config", GIT_CONFIG_VALUE_99: "inherited-fixture-config", GIT_TRACE: "1", GIT_TRACE_CURL: "1", GIT_TRACE_PACKET: "1", GIT_CURL_VERBOSE: "1", GIT_REDACT_COOKIES: "fixture", GIT_TRACE2_EVENT: path.join(home, "git-trace") } : {}),
       },
       stdout: "pipe", stderr: "pipe",
     })
     const [stdout, stderr, exit] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+    expect(await readOrEmpty(path.join(home, "secrets-decoy"))).toBe("")
     const argv = await readOrEmpty(path.join(home, "argv"))
     for (const secret of [privateKey, signing.d!, "FAKE-INSTALLATION-TOKEN", identity]) expect(stdout + stderr + argv).not.toContain(secret)
     const nonces: NonceRecord[] = (await readOrEmpty(path.join(home, "nonces"))).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
     const forwardRequests: ForwardRequest[] = (await readOrEmpty(path.join(home, "forward-requests"))).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
     const gitChildren: GitChild[] = (await readOrEmpty(path.join(home, "git-children"))).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
     const gitTrace = await readOrEmpty(path.join(home, "git-trace"))
+    for (const secret of [privateKey, signing.d!, identity, "FAKE-INSTALLATION-TOKEN"]) expect(JSON.stringify(gitChildren)).not.toContain(secret)
     for (const child of gitChildren) {
-      expect(child.nonceEnv).toBeNull()
-      expect(child.traceKeys).toEqual([])
+      expect(child.identityPresent).toBe(false)
+      if (child.args.includes("protocol.http.allow=always")) {
+        expect(child.nonceEnv).toBeNull()
+        expect(child.privateKeyPresent).toBe(false)
+        expect(child.traceKeys).toEqual([])
+      }
     }
     for (const { command, nonce } of nonces) {
       if (command !== "forward") expect(nonce).toBeNull()
@@ -154,7 +236,7 @@ const scenario = async (input: {
       }
     }
     for (const request of forwardRequests) expect(request.token).toBe(request.nonce)
-    return { stdout, stderr, exit, argv, nonces: nonces.filter((record) => record.command === "forward"), probes: nonces.filter((record) => record.command === "capabilities").length, forwardRequests, gitChildren, gitTrace, direct: await readOrEmpty(path.join(home, "direct")), seen }
+    return { stdout, stderr, exit, argv, groupKills: (await readOrEmpty(path.join(home, "lease-group-kills"))).trim().split("\n").filter(Boolean), allGitChildren: (await readOrEmpty(path.join(home, "all-git-children"))).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)), leaseEnv: (await readOrEmpty(path.join(home, "lease-env"))).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)), leases: await readOrEmpty(path.join(home, "leases")), nonces: nonces.filter((record) => record.command === "forward"), probes: nonces.filter((record) => record.command === "capabilities").length, forwardRequests, gitChildren, gitTrace, direct: await readOrEmpty(path.join(home, "direct")), seen }
   }
   try {
     if (input.git) return await input.git(home, run)
@@ -164,9 +246,348 @@ const scenario = async (input: {
     await rm(home, { recursive: true, force: true })
   }
 }
-type Result = { stdout: string; stderr: string; exit: number; argv: string; nonces: NonceRecord[]; probes: number; forwardRequests: ForwardRequest[]; gitChildren: GitChild[]; gitTrace: string; direct: string; seen: Seen[] }
+type Result = { groupKills: string[]; allGitChildren: GitChild[]; leaseEnv: string[][]; leases: string; stdout: string; stderr: string; exit: number; argv: string; nonces: NonceRecord[]; probes: number; forwardRequests: ForwardRequest[]; gitChildren: GitChild[]; gitTrace: string; direct: string; seen: Seen[] }
 
 describe("GitHub cell route", () => {
+  const trustDriver = async (mode: string, target: string | undefined, cwd: string, searchPath: string) => {
+    const proc = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures/executable-trust-driver.ts"), mode, ...(target === undefined ? [] : [target])], {
+      cwd, env: { PATH: searchPath, HOME: cwd }, stdout: "pipe", stderr: "pipe",
+    })
+    const [stdout, stderr, exit] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+    expect(exit).toBe(0)
+    expect(stderr).toBe("")
+    return JSON.parse(stdout)
+  }
+  test("executable trust checks the grandparent and rejects a foreign uid", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "shitrat-trust-"))
+    try {
+      const grandparent = path.join(root, "ancestor")
+      const parent = path.join(grandparent, "parent")
+      await mkdir(parent, { recursive: true })
+      const binary = path.join(parent, "tool")
+      await writeFile(binary, "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+      expect(trustedExecutable(binary)).toBe(await realpath(binary))
+      const foreign = await trustDriver("foreign-owner", binary, root, process.env.PATH ?? "")
+      expect(foreign.ok).toBe(false)
+      expect(foreign.message).toContain("target owner must be root or the current uid")
+      expect(foreign.path).toBe(await realpath(binary))
+      await chmod(grandparent, 0o777)
+      expect(() => trustedExecutable(binary)).toThrow("ancestor must not be group or world writable")
+      await chmod(grandparent, 0o1777)
+      // Sticky is not an exemption for a non-root owner.
+      if (process.getuid?.() !== 0) expect(() => trustedExecutable(binary)).toThrow("sticky and root owned")
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+  for (const cwdMode of ["ancestor", "filesystem root"]) test(`trusted secrets resolves from ${cwdMode} cwd`, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "shitrat-cwd-"))
+    try {
+      const tools = path.join(root, ".local/bin")
+      await mkdir(tools, { recursive: true })
+      const binary = path.join(tools, "secrets")
+      await writeFile(binary, "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+      const cwd = cwdMode === "ancestor" ? root : path.parse(root).root
+      const expected = { ok: true, result: await realpath(binary) }
+      expect(await trustDriver("resolve", undefined, cwd, tools)).toEqual(expected)
+      expect(await trustDriver("resolve", binary, cwd, "")).toEqual(expected)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+  test("secrets PATH ignores relative and empty entries but accepts a trusted absolute entry", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "shitrat-path-"))
+    try {
+      const repo = path.join(root, "repo")
+      const tools = path.join(root, "tools")
+      await mkdir(path.join(repo, "relative"), { recursive: true })
+      await mkdir(tools)
+      for (const file of [path.join(repo, "secrets"), path.join(repo, "relative/secrets"), path.join(tools, "secrets")]) {
+        await writeFile(file, `#!${process.execPath}\nawait Bun.write(${JSON.stringify(path.join(root, "decoy-ran"))}, "ran");\n`, { mode: 0o755 })
+      }
+      const allowed = await trustDriver("resolve", undefined, repo, `.:relative::${tools}`)
+      expect(allowed).toEqual({ ok: true, result: await realpath(path.join(tools, "secrets")) })
+      const absolute = await trustDriver("resolve", undefined, repo, repo)
+      expect(absolute).toEqual({ ok: true, result: await realpath(path.join(repo, "secrets")) })
+      await chmod(path.join(repo, "secrets"), 0o777)
+      for (const mode of ["required", "optional", "write"]) {
+        const absent = await trustDriver(mode, undefined, repo, ".:relative:")
+        expect(absent).toMatchObject({ ok: false, code: "UNTRUSTED_SECRETS_EXECUTABLE" })
+        expect(absent.message).toContain("untrusted secrets executable")
+        expect(absent.message).toContain("absolute PATH entries")
+        const unsafe = await trustDriver(mode, undefined, repo, repo)
+        expect(unsafe).toMatchObject({ ok: false, code: "UNTRUSTED_SECRETS_EXECUTABLE" })
+        expect(unsafe.message).toContain(await realpath(path.join(repo, "secrets")))
+        expect(unsafe.message).toContain("target must not be group or world writable")
+      }
+      expect(await readOrEmpty(path.join(root, "decoy-ran"))).toBe("")
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+  test("direct CLI reports executable trust failure rather than a missing secret", async () => {
+    const result = await scenario({ via: "direct", noAppEnv: true, trustFailure: "secrets-path", cli: true })
+    expect(result.exit).toBe(1)
+    const envelope = JSON.parse(result.stdout)
+    expect(envelope.error.code).toBe("UNTRUSTED_SECRETS_EXECUTABLE")
+    expect(envelope.error.message).toContain("untrusted secrets executable")
+    expect(envelope.error.message).toContain("ancestor must not be group or world writable")
+    expect(result.leases).toBe("")
+  })
+  test("Git drops inherited config and identity-file paths but keeps invocation config", () => {
+    const original = process.env
+    try {
+      process.env = { ...original, SHITRAT_CELL_IDENTITY_FILE: "/synthetic/identity", GIT_CONFIG_PARAMETERS: "'trace2.eventTarget=unsafe'", GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "trace2.eventTarget", GIT_CONFIG_VALUE_0: "unsafe", GIT_CONFIG_KEY_1: "core.quotePath", GIT_CONFIG_VALUE_1: "true" }
+      const plain = gitEnvironment()
+      for (const key of ["SHITRAT_CELL_IDENTITY_FILE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"]) expect(plain[key]).toBeUndefined()
+      const scoped = gitEnvironment({ GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: "synthetic-scoped-header" })
+      expect(scoped.GIT_CONFIG_COUNT).toBe("1")
+      expect(scoped.GIT_CONFIG_KEY_0).toBe("http.extraHeader")
+      expect(scoped.GIT_CONFIG_VALUE_0).toBe("synthetic-scoped-header")
+      expect(scoped.GIT_CONFIG_KEY_1).toBeUndefined()
+      expect(scoped.GIT_CONFIG_PARAMETERS).toBeUndefined()
+      expect(scoped.SHITRAT_CELL_IDENTITY_FILE).toBeUndefined()
+    } finally { process.env = original }
+  })
+  for (const trustFailure of ["sc-mode", "sc-link", "sc-parent", "sc-link-parent", "secrets-mode", "secrets-path"] as const) test(`auto refuses untrusted executable ${trustFailure} before leasing`, async () => {
+    const result = await scenario({ config: "file", trustFailure, secretsConfig: trustFailure === "secrets-mode", missingIdentity: true, lease: "ok" })
+    expect(result.exit).toBe(0)
+    expect(result.leases).toBe("")
+    expect(result.argv).toBe("")
+    expect(result.stderr).toBe('{"event":"github-route","path":"direct","reason":"cell-configuration"}\n')
+  })
+  test("auto uses an explicit trusted secretsBin with a minimal lease environment", async () => {
+    const result = await scenario({ config: "file", secretsConfig: true, missingIdentity: true, missingDocument: true, lease: "ok" })
+    expect(result.exit).toBe(0)
+    expect(result.direct).toBe("")
+    expect(result.leaseEnv).toHaveLength(1)
+    expect(result.leaseEnv[0]).toContain("PATH")
+    expect(result.leaseEnv[0]).toContain("HOME")
+    expect(result.leaseEnv[0]).toContain("OTEL_EMIT_ENDPOINT")
+    expect(result.leaseEnv[0]).toContain("OTEL_EMIT_TOKEN")
+    expect(result.leaseEnv[0]!.every((key) => key === "PATH" || key === "HOME" || key.startsWith("AGENT_SECRETS") || key.startsWith("XDG") || key.startsWith("OTEL_EMIT_"))).toBe(true)
+    expect(result.groupKills).toEqual([])
+  })
+  for (const noName of [false, true]) test(`auto App-wide installations uses direct once without an identity lease (no name=${noName})`, async () => {
+    const result = await scenario({ noName, config: "file", missingIdentity: true, noAppEnv: true, cli: true, cliArgs: ["installations"] })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, result: { count: 1 } })
+    expect(result.stderr).toBe('{"event":"github-route","path":"direct","reason":"app-operation"}\n')
+    expect(result.argv).toBe("")
+    const calls: string[][] = result.leases.trim().split("\n").map((line) => JSON.parse(line))
+    expect(calls.some((args) => args[1] === "shitrat_github_private_key")).toBe(true)
+    expect(calls.some((args) => args[1]?.startsWith("rat_king_fleet_agent_"))).toBe(false)
+  })
+  test("auto describe black hole falls back within its 8-second setup deadline", async () => {
+    const start = performance.now()
+    const result = await scenario({ config: "file", describeHang: true, missingIdentity: true, lease: "ok" })
+    expect(performance.now() - start).toBeLessThan(12_000)
+    expect(result.exit).toBe(0)
+    expect(result.stderr).toBe('{"event":"github-route","path":"direct","reason":"cell-client"}\n')
+  }, 15_000)
+  test("auto lease deadline includes a grandchild holding stdout open", async () => {
+    const start = performance.now()
+    const result = await scenario({ config: "file", missingIdentity: true, lease: "ok", leaseGrandchild: true })
+    expect(performance.now() - start).toBeLessThan(14_000)
+    expect(result.groupKills).toHaveLength(1)
+    expect(result.exit).toBe(0)
+    expect(result.argv).toBe("")
+    expect(result.stderr).toBe('{"event":"github-route","path":"direct","reason":"cell-configuration"}\n')
+  }, 16_000)
+  test("a prior App-wide direct decision cannot authorize direct after a cell request", async () => {
+    const result = await scenario({ mode: "fallback-app-after-direct-selection" })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ directCalls: 0, error: { reason: "unsupported" } })
+    expect(result.seen).toHaveLength(1)
+    expect(result.direct).toBe("")
+    expect(result.stderr.trim().split("\n").map((line) => JSON.parse(line))).toEqual([
+      { event: "github-route", path: "direct", reason: "app-operation" },
+      { event: "github-route", path: "cell", reason: "unsupported-app-operation" },
+    ])
+  })
+  test("auto typed client error after a forwarded request cannot fall back", async () => {
+    const result = await scenario({ mode: "fallback-client-after-request" })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ directCalls: 0, error: { reason: "client" } })
+    expect(JSON.parse(result.stdout).error.message).toContain("Auto mode falls back to direct on setup failures only.")
+    expect(result.seen).toHaveLength(1)
+    expect(result.stderr).toBe('{"event":"github-route","path":"cell","reason":"requested"}\n')
+  })
+  test("auto rejects a config symlink without a lease", async () => {
+    const result = await scenario({ config: "file", configSymlink: true, missingIdentity: true, lease: "ok" })
+    expect(result.exit).toBe(0)
+    expect(result.leases).toBe("")
+    expect(result.argv).toBe("")
+    expect(result.stderr).toBe('{"event":"github-route","path":"direct","reason":"cell-configuration"}\n')
+  })
+  for (const via of ["auto", "cell"]) for (const identityFixture of ["secure", "insecure", "symlink", "foreign-owner"] as const) test(`${via} opens a real identity file with no env identity (${identityFixture})`, async () => {
+    const result = await scenario({ via, cli: true, identityFixture, missingIdentity: true, ...(via === "auto" ? { config: "file" as const } : {}) })
+    expect(result.leases).toBe("")
+    if (identityFixture === "secure") {
+      expect(result.exit).toBe(0)
+      expect(result.direct).toBe("")
+      expect(result.seen).toHaveLength(2)
+    } else {
+      expect(result.exit).toBe(via === "auto" ? 0 : 1)
+      expect(result.seen).toEqual([])
+      expect(result.argv).not.toContain('"--listen"')
+      if (via === "auto") expect(result.stderr).toBe('{"event":"github-route","path":"direct","reason":"cell-configuration"}\n')
+      else {
+        expect(result.direct).toBe("")
+        expect(JSON.parse(result.stdout).error.message).toContain("No automatic direct-key fallback")
+      }
+    }
+  })
+  test("derived caller document is public-only and verifies without a file", () => {
+    const document = deriveCallerDocument(identity)
+    expect(() => verifyCallerDocument(identity, document)).not.toThrow()
+    expect(JSON.stringify(document)).not.toContain('"d":')
+    expect(JSON.stringify(document)).not.toContain(signing.d!)
+    expect(document).toEqual({ id: "did:web:fixture.example.invalid", authentication: ["did:web:fixture.example.invalid#atproto"], verificationMethod: [{ id: "did:web:fixture.example.invalid#atproto", controller: "did:web:fixture.example.invalid", publicKeyJwk: { kty: signing.kty, crv: signing.crv, x: signing.x, y: signing.y } }] })
+    for (const mutation of ["did", "key", "private"]) {
+      const changed = JSON.parse(JSON.stringify(document))
+      if (mutation === "did") changed.id = "did:web:wrong.example.invalid"
+      if (mutation === "key") changed.verificationMethod[0].publicKeyJwk.x = "wrong-key"
+      if (mutation === "private") changed.verificationMethod[0].publicKeyJwk.d = signing.d
+      expect(() => verifyCallerDocument(identity, changed)).toThrow()
+    }
+    const custom = JSON.stringify({ ...JSON.parse(identity), kid: "#custom" })
+    expect(JSON.stringify(deriveCallerDocument(custom))).toContain("#custom")
+    for (const kid of ["did:web:other.example.invalid#key", "did:web:fixture.example.invalid#key", "not-a-fragment"]) {
+      expect(() => deriveCallerDocument(JSON.stringify({ ...JSON.parse(identity), kid }))).toThrow()
+    }
+  })
+  test("auto without RATKING_NAME stays direct and never leases", async () => {
+    const result = await scenario({ noName: true, missingIdentity: true })
+    expect(result.exit).toBe(0)
+    expect(result.direct).not.toBe("")
+    expect(result.leases).toBe("")
+    expect(result.argv).toBe("")
+    expect(result.stderr).toBe('{"event":"github-route","path":"direct","reason":"selected"}\n')
+  })
+  test("auto with RATKING_NAME=off opts out even with explicit identity and URL", async () => {
+    const result = await scenario({ nameOff: true })
+    expect(result.exit).toBe(0)
+    expect(result.direct).not.toBe("")
+    expect(result.leases).toBe("")
+    expect(result.argv).toBe("")
+  })
+  test("auto honours explicit identity plus URL without RATKING_NAME", async () => {
+    const result = await scenario({ noName: true, missingDocument: true })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout).data.cell).toBe(true)
+    expect(result.direct).toBe("")
+    expect(result.leases).toBe("")
+    expect(result.stderr).toContain('"path":"cell"')
+  })
+  test("protected files must be regular, mode 0600, and owned by the current user", () => {
+    const uid = process.getuid!()
+    const stat = { isFile: () => true, mode: 0o600, uid }
+    expect(() => verifyProtectedFile(stat)).not.toThrow()
+    expect(() => verifyProtectedFile({ ...stat, uid: uid + 1 })).toThrow()
+    expect(() => verifyProtectedFile({ ...stat, isFile: () => false })).toThrow()
+    for (const mode of [0o644, 0o620, 0o602, 0o660, 0o666]) expect(() => verifyProtectedFile({ ...stat, mode })).toThrow()
+  })
+  for (const configMode of [0o644, 0o620, 0o602, 0o660, 0o666]) test(`auto refuses insecure cell.json mode ${configMode.toString(8)} before leasing`, async () => {
+    const result = await scenario({ config: "file", configMode, missingIdentity: true, lease: "ok" })
+    expect(result.exit).toBe(0)
+    expect(result.direct).not.toBe("")
+    expect(result.leases).toBe("")
+    expect(result.argv).toBe("")
+    expect(result.stderr).toContain('"reason":"cell-configuration"')
+  })
+  test("auto refuses a relative scBin before leasing", async () => {
+    const result = await scenario({ config: "relative-bin", missingIdentity: true, lease: "ok" })
+    expect(result.exit).toBe(0)
+    expect(result.direct).not.toBe("")
+    expect(result.leases).toBe("")
+    expect(result.argv).toBe("")
+    expect(result.stderr).toContain('"reason":"cell-configuration"')
+  })
+  for (const failureEnvelope of [false, true]) test(`auto leased identity stays out of the CLI failure envelope when the forward echoes it (outer catch=${failureEnvelope})`, async () => {
+    const result = await scenario({ cli: true, config: "file", missingIdentity: true, missingDocument: true, lease: "ok", forwardFailure: true, failureEnvelope })
+    expect(result.exit).toBe(1)
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false })
+    if (failureEnvelope) expect(JSON.parse(result.stdout)).toMatchObject({ error: { code: "CLI_USAGE_ERROR" } })
+    expect(result.leases).not.toBe("")
+    expect(result.argv).toContain('"forward"')
+    expect(result.stdout).not.toContain(signing.d!)
+    expect(result.stderr).not.toContain(signing.d!)
+    expect(result.stdout).not.toContain(identity)
+    expect(result.stderr).not.toContain(identity)
+    // cli.ts captures String(chunk): a raw Uint8Array must not leak private
+    // material as comma-separated byte values instead of decoded text either.
+    for (const value of [identity, signing.d!]) {
+      const bytes = Array.from(new TextEncoder().encode(value)).join(",")
+      expect(result.stdout).not.toContain(bytes)
+      expect(result.stderr).not.toContain(bytes)
+    }
+  })
+  test("auto without config stays direct and never leases", async () => {
+    const result = await scenario({ config: "missing", missingIdentity: true })
+    expect(result.exit).toBe(0)
+    expect(result.direct).not.toBe("")
+    expect(result.leases).toBe("")
+    expect(result.argv).toBe("")
+    expect(result.stderr).toContain('"reason":"cell-configuration"')
+  })
+  for (const config of ["file", "override"] as const) test(`auto leases once and derives caller document (${config})`, async () => {
+    const result = await scenario({ config, missingIdentity: true, missingDocument: true, lease: "ok", mode: "twice" })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout).data.cell).toBe(true)
+    expect(result.direct).toBe("")
+    expect(result.leases.trim().split("\n").map((line) => JSON.parse(line))).toEqual([["lease", "rat_king_fleet_agent_fixture.agent_identity", "--client-id", "shitrat-cell", "--ttl", "5m"]])
+    expect(result.seen).toHaveLength(3)
+    expect(result.stderr).toContain('"path":"cell"')
+  })
+  for (const lease of ["refused", "invalid"] as const) test(`auto identity lease ${lease} falls back without leaking`, async () => {
+    const result = await scenario({ config: "file", missingIdentity: true, missingDocument: true, lease })
+    expect(result.exit).toBe(0)
+    expect(result.direct).not.toBe("")
+    expect(result.leases).not.toBe("")
+    expect(result.argv).toBe("")
+    expect(result.stderr).toContain('"reason":"cell-configuration"')
+    expect(result.stdout + result.stderr).not.toContain("invalid-identity")
+  })
+  test("auto CLI status emits its route even when stdout is a JSON envelope", async () => {
+    const result = await scenario({ cli: true, config: "file", missingIdentity: true, missingDocument: true, lease: "ok" })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, result: { repo: "example/project" } })
+    expect(result.stderr.trim()).toBe('{"event":"github-route","path":"cell","reason":"requested"}')
+    expect(result.direct).toBe("")
+    expect(result.leases.trim().split("\n")).toHaveLength(1)
+  })
+  test("auto explicit identity derives document and skips lease", async () => {
+    const result = await scenario({ via: "auto", missingDocument: true })
+    expect(result.exit).toBe(0)
+    expect(result.leases).toBe("")
+    expect(result.direct).toBe("")
+    expect(result.seen).toHaveLength(2)
+  })
+  test("auto unreachable during setup falls back with bounded reason", async () => {
+    const result = await scenario({ unreachable: true })
+    expect(result.exit).toBe(0)
+    expect(result.stderr).toMatch(/^\{"event":"github-route","path":"direct","reason":"cell-(?:client|refused)"\}\n$/)
+    expect(result.direct).not.toBe("")
+    expect(result.forwardRequests).toEqual([])
+  })
+  for (const mode of ["fallback-after-request", "fallback-write-timeout", "fallback-write-abort"] as const) test(`auto ${mode} propagates failure without direct replay (typed client case separately proves the phase guard)`, async () => {
+    const result = await scenario({ mode })
+    expect(result.exit).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ directCalls: 0, error: {} })
+    expect(result.seen).toHaveLength(1)
+    expect(result.direct).toBe("")
+    expect(result.stderr).not.toContain('"path":"direct"')
+  })
+  test("explicit cell ignores auto config and fails closed without env", async () => {
+    const result = await scenario({ via: "cell", config: "file", missingIdentity: true, forceFakeClient: true })
+    expect(result.exit).toBe(1)
+    expect(result.probes).toBe(1)
+    expect(result.argv).toContain('"--capabilities"')
+    expect(result.argv).not.toContain('"describe"')
+    expect(result.leases).toBe("")
+    expect(result.direct).toBe("")
+  })
+  test("explicit direct ignores auto config and identity leasing", async () => {
+    const result = await scenario({ via: "direct", config: "malformed", missingIdentity: true })
+    expect(result.exit).toBe(0)
+    expect(result.leases).toBe("")
+    expect(result.argv).toBe("")
+  })
   for (const capability of ["old", "garbage", "timeout", "missing", "false"] as const) test(`unsupported sc capability refuses before describe/forward without fallback (${capability})`, async () => {
     const result = await scenario({ via: "cell", fallback: "direct", capability, cli: true })
     expect(result.exit).toBe(1)
@@ -258,7 +679,7 @@ describe("GitHub cell route", () => {
     expect(result.seen).toEqual([])
     expect(result.direct).toContain("/app/installations/123/access_tokens")
   })
-  test("unset route defaults to cell without loading direct credentials", async () => {
+  test("unset route with fleet identity defaults to cell without loading direct credentials", async () => {
     const result = await scenario({})
     expect(result.exit).toBe(0)
     expect(JSON.parse(result.stdout).data.cell).toBe(true)
@@ -266,7 +687,7 @@ describe("GitHub cell route", () => {
     expect(result.direct).toBe("")
     expect(result.seen.map((request) => request.path)).toEqual(["/v1/describe", "/v1/u/api.github.com/repos/example/project"])
   })
-  for (const mode of ["repo", "org"]) test(`${mode} success goes through signed client forwarding only`, async () => {
+  for (const mode of ["repo", "org"]) test(`${mode} success uses ${process.env.SHITRAT_TEST_SC_BIN ? "real-client signing" : "fixture-contract forwarding"} only`, async () => {
     const result = await scenario({ via: "cell", mode })
     expect(result.exit).toBe(0)
     expect(JSON.parse(result.stdout).data.cell).toBe(true)
@@ -339,6 +760,7 @@ describe("GitHub cell route", () => {
     expect(result.direct).toContain("/app/installations/123/access_tokens")
     expect(result.argv).toBe("")
     expect(result.seen).toEqual([])
+    expect(result.stderr).toContain('{"event":"github-route","path":"direct","reason":"selected"}')
   })
   for (const via of [undefined, "cell"]) test(`status CLI works without direct installation discovery (via=${via ?? "unset"})`, async () => {
     const result = await scenario({ ...(via === undefined ? {} : { via }), cli: true })
@@ -484,7 +906,7 @@ describe("GitHub cell route", () => {
     expect(JSON.parse(result.stdout).data.direct).toBe(true)
     expect(result.stderr).toContain('{"event":"github-route","path":"direct","reason":"cell-refused"}')
   })
-  for (const [mode, name] of [["fallback-write-timeout", "TimeoutError"], ["fallback-write-abort", "AbortError"], ["fallback-write-upstream", "Error"]] as const) test(`${mode} never replays an accepted write through direct`, async () => {
+  for (const [mode, name] of [["fallback-write-timeout", "TimeoutError"], ["fallback-write-abort", "AbortError"], ["fallback-write-upstream", "Error"]] as const) test(`${mode} propagates reply-loss/upstream errors without replay; not a phase-guard proof`, async () => {
     const result = await scenario({ fallback: "direct", mode, ...(mode === "fallback-write-upstream" ? { fetchRefusal: true } : {}) })
     expect(result.exit).toBe(0)
     expect(JSON.parse(result.stdout)).toMatchObject({ directCalls: 0, error: { name } })
@@ -495,7 +917,7 @@ describe("GitHub cell route", () => {
     expect(result.stderr).not.toContain('"path":"direct"')
   })
   for (const mode of ["fallback-configuration", "fallback-forward-start"]) test(`${mode} still permits explicit setup fallback`, async () => {
-    const result = await scenario({ fallback: "direct", mode, ...(mode === "fallback-forward-start" ? { forwardFailure: true } : {}) })
+    const result = await scenario({ via: "cell", fallback: "direct", mode, ...(mode === "fallback-forward-start" ? { forwardFailure: true } : {}) })
     expect(result.exit).toBe(0)
     expect(JSON.parse(result.stdout)).toEqual({ directCalls: 1 })
     expect(result.seen).toEqual([])
@@ -609,6 +1031,59 @@ describe("GitHub cell route", () => {
     expect(invocation.env.GIT_CONFIG_VALUE_2).toBe("x-sc-forward-token: fixture-run-nonce")
     expect(invocation.args.join(" ")).not.toContain("fixture-run-nonce")
     expect(invocation.env).not.toHaveProperty("SHITRAT_PUSH_TOKEN")
+  })
+  for (const config of ["file", "missing", "fallback"] as const) for (const pushCli of [false, true]) test(`auto ${pushCli ? "push CLI dry run" : "real push"} uses ${config === "file" ? "cell" : config === "missing" ? "direct without lease or probe" : "direct fallback with explicit parent credentials stripped"}`, async () => {
+    await scenario({ config: config === "fallback" ? "file" : config, pushCli, mode: "auto-push", missingIdentity: config !== "fallback", missingDocument: true, lease: "ok", gitTracing: true, parentCredentials: config === "fallback", refusal: config === "fallback", forceFakeClient: config === "fallback", git: async (home, run) => {
+      const local = path.join(home, "local")
+      await mkdir(path.join(home, "example"))
+      const git = async (args: string[], cwd = home) => {
+        const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+        const [stdout, stderr, exit] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+        if (exit !== 0) throw new Error(stderr)
+        return stdout.trim()
+      }
+      await git(["init", "--bare", "-b", "main", "example/project.git"])
+      await git(["config", "http.receivepack", "true"], path.join(home, "example/project.git"))
+      await git(["init", "-b", "main", "local"])
+      await git(["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture"], local)
+      await git(["remote", "add", "origin", "https://github.com/example/project.git"], local)
+      const sha = await git(["rev-parse", "HEAD"], local)
+      const result = await run(["push", "https://github.com/example/project.git", "HEAD:refs/heads/main"])
+      expect(result.exit).toBe(0)
+      expect(result.gitChildren.some((child) => child.args.includes("push"))).toBe(true)
+      expect(result.gitChildren.every((child) => !child.identityPresent)).toBe(true)
+      expect(result.allGitChildren.length).toBeGreaterThanOrEqual(result.gitChildren.length)
+      for (const child of result.allGitChildren) {
+        expect(child.identityPresent).toBe(false)
+        expect(child.privateKeyPresent).toBe(false)
+        expect(child.passPresent).toBe(false)
+        expect(child.identityFilePresent).toBe(false)
+        expect(child.inheritedConfigPresent).toBe(false)
+        expect(child.inheritedTokenPresent).toBe(false)
+        expect(child.nonceEnv).toBeNull()
+        expect(child.traceKeys).toEqual([])
+      }
+      if (pushCli) expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, result: { dry_run: true, would_push: 1 } })
+      else expect(await git(["rev-parse", "refs/heads/main"], path.join(home, "example/project.git"))).toBe(sha)
+      if (config === "file") {
+        expect(result.stderr).toContain('"path":"cell"')
+        expect(result.direct).toBe("")
+        expect(result.leases.trim().split("\n")).toHaveLength(1)
+        expect(result.probes).toBe(1)
+        expect(result.nonces).toHaveLength(pushCli ? 2 : 1)
+        for (const forward of result.nonces) expect(forward).toMatchObject({ command: "forward", identityPresent: true, privateKeyPresent: false })
+        expect(result.gitChildren.every((child) => !child.privateKeyPresent)).toBe(true)
+      } else {
+        expect(result.stderr).toContain('"path":"direct"')
+        expect(result.leases).toBe("")
+        expect(result.probes).toBe(config === "fallback" ? 1 : 0)
+        if (config === "missing") expect(result.argv).toBe("")
+        else expect(result.stderr).toBe('{"event":"github-route","path":"direct","reason":"cell-refused"}\n')
+        expect(result.nonces).toEqual([])
+        expect(result.direct).not.toBe("")
+      }
+      return result
+    } })
   })
   for (const gitTracing of [false, true]) test(`real git smart HTTP pushes binary packs and fetches through the fake cell (parent tracing=${gitTracing})`, async () => {
     await scenario({ via: "cell", mode: "git", gitTracing, git: async (home, run) => {

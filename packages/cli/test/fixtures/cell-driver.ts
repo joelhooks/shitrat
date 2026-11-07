@@ -27,8 +27,9 @@ try {
         }, { preconnect: originalFetch.preconnect })
       }
       try {
-        if (mode === "fallback-after-request" || mode === "fallback-app-after-request") await request()
-        if (mode === "fallback-app-after-request") {
+        if (mode === "fallback-app-after-direct-selection") requireDirectGitHub()
+        if (mode === "fallback-after-request" || mode === "fallback-app-after-request" || mode === "fallback-app-after-direct-selection") await request()
+        if (mode === "fallback-app-after-request" || mode === "fallback-app-after-direct-selection") {
           requireDirectGitHub()
           directCalls++
         } else {
@@ -47,6 +48,7 @@ try {
               }
               if (mode === "fallback-configuration" || mode === "fallback-after-request") throw new GitHubCellError("configuration")
               const response = await request()
+              if (mode === "fallback-client-after-request") throw new GitHubCellError("client")
               if (!response.ok) throw new Error("fixture upstream failure")
               return response
             },
@@ -101,6 +103,11 @@ try {
         }
       }
       process.stdout.write(JSON.stringify({ errors }))
+    } else if (process.argv[2] === "auto-push") {
+      // Same route selection and authenticated transport used by pushCmd.
+      const { token } = await Effect.runPromise(createRepoOctokit({ owner: "example", repo: "project", fullName: "example/project" }))
+      const result = await runCellGit({ args: JSON.parse(process.env.CELL_TEST_GIT_ARGS!), cwd: process.env.CELL_TEST_GIT_CWD!, placeholder: token.token })
+      process.stdout.write(JSON.stringify(result))
     } else if (process.argv[2] === "git") {
       await cellFetch("https://api.github.com/repos/example/project", {
         headers: { authorization: "Bearer {{secret:shitrat-github/example}}" },

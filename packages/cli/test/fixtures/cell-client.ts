@@ -7,7 +7,7 @@ if (process.env.CELL_TEST_ARGV) await appendFile(process.env.CELL_TEST_ARGV, `${
 const value = (name: string) => args[args.indexOf(name) + 1]
 const origin = process.env.SC_URL!
 const nonce = process.env.SC_FORWARD_NONCE
-if (process.env.CELL_TEST_NONCES) await appendFile(process.env.CELL_TEST_NONCES, `${JSON.stringify({ command: args.includes("--capabilities") ? "capabilities" : args[0], nonce: nonce ?? null })}\n`)
+if (process.env.CELL_TEST_NONCES) await appendFile(process.env.CELL_TEST_NONCES, `${JSON.stringify({ command: args.includes("--capabilities") ? "capabilities" : args[0], nonce: nonce ?? null, identityPresent: !!process.env.SC_IDENTITY_JSON, privateKeyPresent: !!process.env.SHITRAT_GITHUB_PRIVATE_KEY })}\n`)
 if (args.includes("--capabilities")) {
   // The launcher supplies no identity, URL, pass or nonce to the probe.
   if (["SC_IDENTITY_JSON", "SC_URL", "SC_AUDIENCE", "SC_PASS_FILE", "SC_FORWARD_NONCE", "SHITRAT_GITHUB_PRIVATE_KEY"].some((key) => process.env[key] !== undefined)) process.exit(8)
@@ -22,8 +22,12 @@ if (process.env.CELL_TEST_FORWARD_FAIL === "1" && args.includes("forward")) {
   process.stderr.write((nonce ?? "") + (process.env.SC_IDENTITY_JSON ?? ""))
   process.exit(3)
 }
+// Assert the credential reaches sc's env, without recording private material.
+const identity: unknown = JSON.parse(process.env.SC_IDENTITY_JSON ?? "null")
+if (typeof identity !== "object" || identity === null || !("did" in identity) || identity.did !== "did:web:fixture.example.invalid" || !("signing" in identity) || typeof identity.signing !== "object" || identity.signing === null || !("d" in identity.signing)) process.exit(9)
 const headers = { "x-sc-auth": "fixture-caller-token" }
 if (args.includes("describe")) {
+  if (process.env.CELL_TEST_DESCRIBE_HANG === "1") await new Promise(() => { setInterval(() => {}, 60_000) })
   const response = await fetch(`${origin}/v1/describe?name=shitrat-github`, { headers, redirect: "manual" })
   process.exit(response.ok ? 0 : 1)
 }

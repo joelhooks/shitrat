@@ -676,6 +676,14 @@ const restoreOutput = () => {
   console.info = rawConsoleInfo
 }
 
+// The JSON envelope consumes generic diagnostics, but bounded route events are
+// operational evidence. Preserve runner-token's separate token/expiry contract.
+const writeRouteEvents = () => {
+  for (const line of capturedStderr.join("").split("\n")) {
+    if (/^\{"event":"github-route","path":"(?:cell|direct)","reason":"[a-z-]{1,80}"\}$/.test(line)) rawStderrWrite(`${line}\n`)
+  }
+}
+
 const writeStdout = (text: string) => {
   rawStdoutWrite(text.endsWith("\n") ? text : `${text}\n`)
 }
@@ -696,6 +704,7 @@ withCellCommand(() => Effect.runPromise(run))
       }
       return
     }
+    writeRouteEvents()
     const stdout = capturedStdout.join("")
     const stderr = capturedStderr.join("")
     if (isJsonEnvelope(stdout)) {
@@ -725,6 +734,7 @@ withCellCommand(() => Effect.runPromise(run))
       process.exitCode = 1
       return
     }
+    writeRouteEvents()
     const stderr = stripAnsi(capturedStderr.join("")).trim()
     writeStdout(
       json(
