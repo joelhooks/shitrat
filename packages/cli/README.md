@@ -111,7 +111,7 @@ bun run src/cli.ts rerun badass-courses/drovr <run-id> --failed --dry-run
 # Preview an org runner group restricted to exactly one private repo. Existing access is replaced.
 bun run src/cli.ts runner-group --org example --name isolated --repo example/project --dry-run
 # Apply only after authorizing the runner group change.
-bun run src/cli.ts runner-group --org example --name isolated --repo example/project
+bun run src/cli.ts runner-group --org example --name isolated --repo example/project --yes
 # Restrict workflow access too. Repeat --workflow for each allowed workflow/ref.
 bun run src/cli.ts runner-group --org example --name isolated --repo example/project --workflow example/project/.github/workflows/deploy.yml@refs/heads/main --dry-run
 # Undo only workflow restrictions, keeping the one-repository policy.
@@ -193,9 +193,31 @@ The stored tokens change only after every check passes: callback state matches, 
 
 `x refresh` trades the stored refresh token for a new access token: one request, no retry. X rotates refresh tokens, so the new one is written and read back before the access token, then `users/me` confirms it. A rejected refresh writes nothing; rerun `x auth`. Access tokens last about two hours, so run `x refresh` before any read that comes later than that.
 
+### Actions variables
+
+```sh
+shitrat variables list example/project
+shitrat variables list --org example
+shitrat variables set example/project CI_ROUTE build
+shitrat variables delete --org example CI_ROUTE
+```
+
+Lists return `name`, `value`, and `updated_at`. Set and delete preview the request and current value. Add `--yes` to write and verify with a fresh read. Creating an organization variable defaults to private repositories; updating one keeps its existing visibility. Variables are not secrets. The value appears in the JSON receipt and, for set, in the command line.
+
+### Organization runner groups
+
+```sh
+shitrat runner-group get 7 --org example
+shitrat runner-group create --org example --name isolated --visibility selected
+shitrat runner-group update 7 --org example --repo example/project --restricted-to-workflows --workflow example/project/.github/workflows/ci.yml@refs/heads/main
+shitrat runner-group add-runner 7 42 --org example
+```
+
+`get` accepts an ID or exact name and returns the policy plus selected repositories. For `private` or `all` visibility, `repositories` reports the scope rather than an enumerated allowlist. Mutations preview by default and need `--yes`. `create` defaults to `selected` with an empty allowlist. With `update`, repeat `--repo` to replace the selected allowlist. `--visibility selected` with no `--repo` clears it; omitting both preserves the existing visibility and allowlist. Public access is off unless `--allow-public` is passed. The legacy `--org ... --name ... --repo ...` form still manages one private repository, and now requires `--yes` to write.
+
 ### Runner group workflow policy
 
-`runner-group --workflow` accepts only workflows owned by `--org`, using `.github/workflows/<file>.yml` or `.yaml` and a full `@refs/heads/<branch>` or `@refs/tags/<tag>` ref. Wildcards, bare branches and commit SHAs are refused. Repeat the flag to allow more workflows. Readback must match the exact requested workflow set, regardless of order.
+`runner-group --workflow` accepts only workflows owned by `--org`, using `.github/workflows/<file>.yml` or `.yaml` and a full `@refs/heads/<branch>` or `@refs/tags/<tag>` ref. Wildcards, bare branches and commit SHAs are refused. Repeat the flag to allow more workflows. `--restricted-to-workflows` requires at least one pinned `--workflow`. Readback must match the exact requested workflow set, regardless of order.
 
 `--all-workflows` disables the workflow restriction and verifies that GitHub saved `false`. It cannot be combined with `--workflow`. Without either flag, workflow fields are omitted from requests and existing workflow restrictions stay untouched. Dry-run includes the intended workflow policy and performs no writes.
 

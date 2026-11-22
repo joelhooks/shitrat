@@ -1,7 +1,7 @@
-import { Command, Options } from "@effect/cli"
+import { Args, Command, Options } from "@effect/cli"
 import { Console, Effect, Option } from "effect"
 import { writeSync } from "node:fs"
-import { createOrgOctokit, ensureRunnerGroup, listOrgRunners, listRepoRunners, removeRepoRunner, listRunnerGroups, runnerWorkflowPolicy, registrationToken, RunnerApiError, RunnerRateLimitError } from "../org-runners.js"
+import { addRunnerToGroup, changeRunnerGroup, getRunnerGroup, groupWorkflowPolicy, type RunnerGroupVisibility, createOrgOctokit, ensureRunnerGroup, listOrgRunners, listRepoRunners, removeRepoRunner, listRunnerGroups, runnerWorkflowPolicy, registrationToken, RunnerApiError, RunnerRateLimitError } from "../org-runners.js"
 import { parseRepo } from "../github-app.js"
 import { failure, json, success } from "../response.js"
 
@@ -27,6 +27,55 @@ export const runnerTokenCmd = Command.make("runner-token", { org: orgOption }, (
   }))),
 ).pipe(Command.withDescription("Mint an org runner registration token; token only on stdout, expiry on stderr"))
 
+const validateOrg = (org: string) => Effect.try({ try: () => {
+  if (!/^[a-z\d][a-z\d-]*$/i.test(org)) throw new RunnerApiError("invalid --org")
+}, catch: (error) => error })
+const groupArg = Args.text({ name: "group" }).pipe(Args.withDescription("Runner group ID or exact name"))
+const groupWorkflows = Options.text("workflow").pipe(Options.repeated)
+const allWorkflows = Options.boolean("all-workflows")
+const yes = Options.boolean("yes").pipe(Options.withDescription("Send the request; by default preview only"))
+const groupOptions = {
+  org: orgOption,
+  visibility: Options.choice<RunnerGroupVisibility, readonly RunnerGroupVisibility[]>("visibility", ["selected", "private", "all"]).pipe(Options.optional),
+  repo: Options.text("repo").pipe(Options.repeated),
+  allowPublic: Options.boolean("allow-public"),
+  restrictedToWorkflows: Options.boolean("restricted-to-workflows"),
+  workflows: groupWorkflows,
+  allWorkflows,
+  yes,
+}
+const groupNext = (org: string) => [{ command: `runner-group get <group> --org ${org}`, description: "Read the effective group policy and repository access" }]
+type GroupChange = Parameters<typeof changeRunnerGroup>[1]
+const changeGroup = (input: GroupChange) => {
+  const command = `runner-group ${input.action}`
+  return Effect.gen(function* () {
+    yield* validateOrg(input.org)
+    yield* Effect.try({ try: () => groupWorkflowPolicy(input), catch: (error) => error })
+    const octokit = yield* createOrgOctokit(input.org)
+    const result = yield* apiEffect(() => changeRunnerGroup(octokit, input))
+    yield* Console.log(json(success(command, result, groupNext(input.org))))
+  }).pipe(Effect.catchAll((error) => failureEffect(command, error)))
+}
+const groupCreateCmd = Command.make("create", { ...groupOptions, name: Options.text("name") }, (input) =>
+  changeGroup({ ...input, action: "create", visibility: Option.getOrUndefined(input.visibility) }))
+const groupUpdateCmd = Command.make("update", { ...groupOptions, group: groupArg }, (input) =>
+  changeGroup({ ...input, action: "update", visibility: Option.getOrUndefined(input.visibility) }))
+const groupGetCmd = Command.make("get", { org: orgOption, group: groupArg }, ({ org, group }) => Effect.gen(function* () {
+  yield* validateOrg(org)
+  const octokit = yield* createOrgOctokit(org)
+  const result = yield* apiEffect(() => getRunnerGroup(octokit, org, group))
+  yield* Console.log(json(success("runner-group get", result)))
+}).pipe(Effect.catchAll((error) => failureEffect("runner-group get", error))))
+const groupAddRunnerCmd = Command.make("add-runner", {
+  org: orgOption, group: groupArg, id: Args.integer({ name: "runner-id" }), yes,
+}, (input) => Effect.gen(function* () {
+  yield* validateOrg(input.org)
+  if (!Number.isSafeInteger(input.id) || input.id <= 0) return yield* failureEffect("runner-group add-runner", new RunnerApiError("runner id must be a positive safe integer"))
+  const octokit = yield* createOrgOctokit(input.org)
+  const result = yield* apiEffect(() => addRunnerToGroup(octokit, input))
+  yield* Console.log(json(success("runner-group add-runner", result, groupNext(input.org))))
+}).pipe(Effect.catchAll((error) => failureEffect("runner-group add-runner", error))))
+
 const failureEffect = (command: string, error: unknown) => Effect.gen(function* () {
   const rateLimited = error instanceof RunnerRateLimitError
   yield* Console.log(json(failure(command, safeError(error), rateLimited ? error.code : "ORG_RUNNERS_FAILED",
@@ -35,22 +84,26 @@ const failureEffect = (command: string, error: unknown) => Effect.gen(function* 
 })
 
 export const runnerGroupCmd = Command.make("runner-group", {
-  org: orgOption,
-  name: Options.text("name"),
-  repo: Options.text("repo"),
+  org: orgOption.pipe(Options.optional),
+  name: Options.text("name").pipe(Options.optional),
+  repo: Options.text("repo").pipe(Options.optional),
   dryRun: Options.boolean("dry-run"),
-  workflows: Options.text("workflow").pipe(Options.repeated),
-  allWorkflows: Options.boolean("all-workflows"),
+  workflows: groupWorkflows,
+  allWorkflows,
+  yes,
 }, (input) => Effect.gen(function* () {
-  yield* Effect.try({ try: () => runnerWorkflowPolicy(input.org, input.workflows, input.allWorkflows), catch: (error) => error })
-  const octokit = yield* createOrgOctokit(input.org)
-  const result = yield* apiEffect(() => ensureRunnerGroup(octokit, input))
-  yield* Console.log(json(success("runner-group", result, [{
-    command: `runners --org ${input.org} --group ${input.name}`,
-    description: "Read the runners registered in this group",
-  }])))
-}).pipe(Effect.catchAll((error) => failureEffect("runner-group", error))))
-  .pipe(Command.withDescription("Create or restrict a runner group to exactly one private repository"))
+  const { org, name, repo } = input
+  if (Option.isNone(org) || Option.isNone(name) || Option.isNone(repo)) return yield* failureEffect("runner-group", new RunnerApiError("use a subcommand, or provide --org, --name, and --repo for the legacy one-repository form"))
+  if (input.dryRun && input.yes) return yield* failureEffect("runner-group", new RunnerApiError("--dry-run and --yes are mutually exclusive"))
+  yield* validateOrg(org.value)
+  yield* Effect.try({ try: () => runnerWorkflowPolicy(org.value, input.workflows, input.allWorkflows), catch: (error) => error })
+  const octokit = yield* createOrgOctokit(org.value)
+  const result = yield* apiEffect(() => ensureRunnerGroup(octokit, { ...input, org: org.value, name: name.value, repo: repo.value, dryRun: !input.yes }))
+  yield* Console.log(json(success("runner-group", result, groupNext(org.value))))
+}).pipe(Effect.catchAll((error) => failureEffect("runner-group", error)))).pipe(
+  Command.withDescription("Read or preview changes to organization runner groups"),
+  Command.withSubcommands([groupCreateCmd, groupGetCmd, groupUpdateCmd, groupAddRunnerCmd]),
+)
 
 export const runnerGroupsCmd = Command.make("runner-groups", {
   org: orgOption,

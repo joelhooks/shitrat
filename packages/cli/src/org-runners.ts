@@ -34,7 +34,7 @@ export const runnerApiCall = async <T>(endpoint: string, request: () => Promise<
   }
 }
 
-export const createOrgOctokit = (org: string) => createInstallationToken(org).pipe(
+export const createOrgOctokit = (org: string, repo?: string) => createInstallationToken(org, repo).pipe(
   Effect.map(({ token }) => isCellPlaceholder(token) ? createTokenOctokit(token) : new Octokit({
     auth: token,
     // Octokit's default logger can print an HTTP error before our sanitizer sees it.
@@ -84,6 +84,114 @@ const groupPolicyCall = async <T>(endpoint: string, request: () => Promise<T>, w
     }
     throw error
   }
+}
+
+const groupPath = "/orgs/{org}/actions/runner-groups/{runner_group_id}"
+const groupRepoPath = "/orgs/{org}/actions/runner-groups/{runner_group_id}/repositories"
+const groupRunnersPath = "/orgs/{org}/actions/runner-groups/{runner_group_id}/runners"
+const groupsPath = "/orgs/{org}/actions/runner-groups"
+const groupsRead = "organization_self_hosted_runners: read"
+
+const getGroupPolicy = async (octokit: GitHubOctokit, org: string, group: string) => {
+  const id = /^[1-9]\d*$/.test(group) ? Number(group) : undefined
+  if (id !== undefined && !Number.isSafeInteger(id)) throw new RunnerApiError("runner group id must be a positive safe integer")
+  const candidates = id !== undefined ? [] : (await groups(octokit, org)).filter(({ name }) => name === group)
+  if (id === undefined && candidates.length !== 1) throw new RunnerApiError("runner group not found or ambiguous")
+  const idToRead = id ?? candidates[0]?.id
+  if (idToRead === undefined) throw new RunnerApiError("runner group not found")
+  const { data } = await runnerApiCall(`GET ${groupPath}`, () => octokit.request(`GET ${groupPath}`, { org, runner_group_id: idToRead }), groupsRead)
+  if (data.id !== idToRead) throw new RunnerApiError("runner group id readback mismatch")
+  return data
+}
+
+const getGroupRepos = (octokit: GitHubOctokit, org: string, id: number) =>
+  runnerApiCall(`GET ${groupRepoPath}`, () => octokit.paginate(`GET ${groupRepoPath}`, { org, runner_group_id: id, per_page: 100 }), groupsRead)
+
+export const getRunnerGroup = async (octokit: GitHubOctokit, org: string, group: string) => {
+  const policy = await getGroupPolicy(octokit, org, group)
+  // The repositories subresource represents a selected allowlist, not an org-wide inventory.
+  const repositories = policy.visibility === "selected" ? await getGroupRepos(octokit, org, policy.id) : policy.visibility
+  return { ...policy, repositories }
+}
+
+export type RunnerGroupVisibility = "selected" | "private" | "all"
+type GroupChange = {
+  org: string; repo: readonly string[]; visibility?: RunnerGroupVisibility | undefined; allowPublic: boolean
+  restrictedToWorkflows: boolean; allWorkflows: boolean; workflows: readonly string[]; yes?: boolean
+} & ({ action: "create"; name: string } | { action: "update"; group: string })
+
+export const groupWorkflowPolicy = (input: Pick<GroupChange, "org" | "workflows" | "restrictedToWorkflows" | "allWorkflows">) => {
+  if (input.restrictedToWorkflows && input.workflows.length === 0) throw new RunnerApiError("--restricted-to-workflows requires at least one pinned --workflow")
+  return runnerWorkflowPolicy(input.org, input.workflows, input.allWorkflows)
+}
+
+export const changeRunnerGroup = async (octokit: GitHubOctokit, input: GroupChange) => {
+  const { org, action } = input
+  const workflowPolicy = groupWorkflowPolicy(input)
+  const changesWorkflows = workflowPolicy.restricted_to_workflows !== undefined
+  const existing = action === "update" ? await getGroupPolicy(octokit, org, input.group) : null
+  if (existing) workflowWritable(existing, `GET ${groupPath}`, changesWorkflows)
+  const visibility = input.visibility ?? (input.repo.length ? "selected" : existing?.visibility ?? "selected")
+  if (visibility !== "selected" && visibility !== "private" && visibility !== "all") throw new RunnerApiError("unknown runner group visibility")
+  if (input.repo.length && visibility !== "selected") throw new RunnerApiError("--repo requires selected visibility")
+  const repoIds = new Set<number>()
+  for (const repo of input.repo) {
+    const ref = parseRepo(repo)
+    if (ref.owner.toLowerCase() !== org.toLowerCase()) throw new RunnerApiError("repository must belong to --org")
+    const { data } = await runnerApiCall("GET /repos/{owner}/{repo}", () => octokit.rest.repos.get({ owner: ref.owner, repo: ref.repo }), "repository metadata: read")
+    if (data.private !== true && !input.allowPublic) throw new RunnerApiError("public repository refused: pass --allow-public to include public repositories")
+    if (!Number.isSafeInteger(data.id) || data.id <= 0) throw new RunnerApiError("invalid repository id in metadata response")
+    repoIds.add(data.id)
+  }
+  const selected = visibility === "selected" && (!existing || input.visibility === "selected" || input.repo.length > 0)
+    ? { selected_repository_ids: [...repoIds] } : undefined
+  const name = input.action === "create" ? input.name : existing?.name
+  if (!name?.trim()) throw new RunnerApiError("runner group name is required")
+  const base = `/orgs/${encodeURIComponent(org)}/actions/runner-groups`
+  const policy = { name, visibility, allows_public_repositories: input.allowPublic, ...workflowPolicy } as const
+  const body = { ...policy, ...selected }
+  const requests = existing
+    ? [{ method: "PATCH", endpoint: `${base}/${existing.id}`, body: policy },
+      ...(selected ? [{ method: "PUT", endpoint: `${base}/${existing.id}/repositories`, body: selected }] : [])]
+    : [{ method: "POST", endpoint: base, body }]
+  if (!input.yes) return { dry_run: true, action, before: existing, requests }
+
+  const saved = existing
+    ? (await groupPolicyCall(`PATCH ${groupPath}`, () => octokit.request(`PATCH ${groupPath}`, { org, runner_group_id: existing.id, ...policy }), changesWorkflows)).data
+    : (await groupPolicyCall(`POST ${groupsPath}`, () => octokit.request(`POST ${groupsPath}`, { org, ...body }), changesWorkflows)).data
+  const writeEndpoint = existing ? `PATCH ${groupPath}` : `POST ${groupsPath}`
+  if (!Number.isSafeInteger(saved.id) || saved.id <= 0 || (existing && existing.id !== saved.id)) throw new RunnerApiError("runner group write returned an unexpected id")
+  workflowWritable(saved, writeEndpoint, changesWorkflows)
+  if (existing && selected) {
+    await runnerApiCall(`PUT ${groupRepoPath}`, () => octokit.request(`PUT ${groupRepoPath}`, { org, runner_group_id: existing.id, ...selected }))
+  }
+  const after = await getRunnerGroup(octokit, org, String(saved.id))
+  workflowWritable(after, `GET ${groupPath}`, changesWorkflows)
+  const workflows = workflowPolicy.selected_workflows
+  if (after.name !== name || after.visibility !== visibility || after.allows_public_repositories !== input.allowPublic ||
+    (changesWorkflows && after.restricted_to_workflows !== workflowPolicy.restricted_to_workflows) ||
+    (workflows && (after.selected_workflows?.length !== workflows.length || !workflows.every((workflow) => after.selected_workflows?.includes(workflow)))) ||
+    (selected && (!Array.isArray(after.repositories) || after.repositories.length !== repoIds.size ||
+      new Set(after.repositories.map(({ id }) => id)).size !== repoIds.size || after.repositories.some(({ id }) => !repoIds.has(id))))) {
+    throw new RunnerApiError("runner group policy readback mismatch; inspect the group before retrying")
+  }
+  return { dry_run: false, action, before: existing, requests, after }
+}
+
+export const addRunnerToGroup = async (octokit: GitHubOctokit, { org, group, id, yes }: { org: string; group: string; id: number; yes?: boolean }) => {
+  if (!Number.isSafeInteger(id) || id <= 0) throw new RunnerApiError("runner id must be a positive safe integer")
+  const target = await getGroupPolicy(octokit, org, group)
+  const runner = await runnerApiCall("GET /orgs/{org}/actions/runners/{runner_id}", () => octokit.rest.actions.getSelfHostedRunnerForOrg({ org, runner_id: id }), groupsRead)
+  if (runner.data.id !== id) throw new RunnerApiError("runner id readback mismatch")
+  const params = { org, runner_group_id: target.id }
+  const request = { method: "PUT", endpoint: `/orgs/${encodeURIComponent(org)}/actions/runner-groups/${target.id}/runners/${id}` }
+  const result = { org, id, group: { id: target.id, name: target.name }, request }
+  if (!yes) return { ...result, dry_run: true }
+  await runnerApiCall(`PUT ${groupRunnersPath}/{runner_id}`, () =>
+    octokit.request(`PUT ${groupRunnersPath}/{runner_id}`, { ...params, runner_id: id }))
+  const members = await runnerApiCall(`GET ${groupRunnersPath}`, () => octokit.paginate(`GET ${groupRunnersPath}`, { ...params, per_page: 100 }), groupsRead)
+  if (!members.some((member) => member.id === id)) throw new RunnerApiError("runner group membership readback mismatch; inspect the runner before retrying")
+  return { ...result, dry_run: false, readback: { group: result.group, runner_id: id } }
 }
 
 export const ensureRunnerGroup = async (octokit: GitHubOctokit, input: { org: string; name: string; repo: string; dryRun: boolean; workflows?: readonly string[]; allWorkflows?: boolean }) => {
