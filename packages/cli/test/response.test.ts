@@ -192,7 +192,7 @@ describe("local git push", () => {
         repoDir: dir,
         branch: "release",
       })
-      const plan = await resolvePushPlan(repository, false)
+      const plan = await resolvePushPlan(repository, false, "main")
 
       expect(plan.commits).toHaveLength(0)
       expect(plan.nothingToPush).toBe(false)
@@ -324,14 +324,15 @@ describe("local git push", () => {
     expect(pushArgs).toContain("--no-verify")
     expect(pushArgs).toContain("--recurse-submodules=no")
     expect(pushArgs).not.toContain("--force")
-    expect(
-      buildFetchCommandArgs({
-        repo: "joelhooks/shitrat-cli",
-        gitRoot: "/tmp/unused",
-        branch: "main",
-        localSha: "0123456789012345678901234567890123456789",
-      }),
-    ).toContain("--no-recurse-submodules")
+    const fetchArgs = buildFetchCommandArgs({
+      repo: "joelhooks/shitrat-cli",
+      gitRoot: "/tmp/unused",
+      branch: "main",
+      localSha: "0123456789012345678901234567890123456789",
+    })
+    expect(fetchArgs).toContain("--no-recurse-submodules")
+    expect(fetchArgs).toContain("--prune")
+    expect(fetchArgs).toContain("+refs/heads/*:refs/remotes/origin/*")
   })
 })
 

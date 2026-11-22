@@ -332,19 +332,24 @@ export interface PushPlan {
 }
 
 const optionalCommitSha = async (ref: string, cwd: string): Promise<string | undefined> => {
-  const result = await runGitResult(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], {
-    cwd,
-  })
-  return result.exitCode === 0 ? result.stdout.trim() : undefined
+  const result = await runGitResult(
+    ["for-each-ref", "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(symref)", "--", ref],
+    { cwd },
+  )
+  if (result.exitCode !== 0) return undefined
+  for (const line of result.stdout.split("\n")) {
+    const [name, sha, type, symref] = line.split("\0")
+    if (name === ref && type === "commit" && symref === "") return sha
+  }
+  return undefined
 }
 
 const outgoingShas = async (
   repository: PushRepository,
-  remoteSha: string | undefined,
+  publishedTips: readonly string[],
 ): Promise<readonly string[]> => {
-  const args = remoteSha
-    ? ["rev-list", "--reverse", `${remoteSha}..${repository.localSha}`]
-    : ["rev-list", "--reverse", repository.localSha, "--not", "--remotes=origin"]
+  const args = ["rev-list", "--reverse", repository.localSha]
+  if (publishedTips.length > 0) args.push("--not", ...publishedTips)
   const output = await runGit(args, { cwd: repository.gitRoot })
   return output.length === 0 ? [] : output.split("\n").filter(Boolean)
 }
@@ -361,6 +366,7 @@ const authorFix = (repo: string): string =>
 export const resolvePushPlan = async (
   repository: PushRepository,
   allowAnyAuthor: boolean,
+  defaultBranch?: string,
 ): Promise<PushPlan> => {
   const remoteRef = `refs/remotes/origin/${repository.branch}`
   const remoteSha = await optionalCommitSha(remoteRef, repository.gitRoot)
@@ -379,7 +385,11 @@ export const resolvePushPlan = async (
     }
   }
 
-  const shas = await outgoingShas(repository, remoteSha)
+  const defaultSha = defaultBranch && defaultBranch !== repository.branch
+    ? await optionalCommitSha(`refs/remotes/origin/${defaultBranch}`, repository.gitRoot)
+    : undefined
+  const publishedTips = [remoteSha, defaultSha].filter((sha) => sha !== undefined)
+  const shas = await outgoingShas(repository, publishedTips)
   const commits = await Promise.all(shas.map((sha) => readCommitAuthor(sha, repository.gitRoot)))
   if (!allowAnyAuthor) {
     const violations = commits.filter(

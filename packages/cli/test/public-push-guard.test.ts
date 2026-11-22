@@ -47,23 +47,44 @@ const fixture = async () => {
   await git(root, "add", "README.md")
   await git(root, ...bot, "commit", "-q", "-m", "init")
   await git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
-  const commit = async (files: Record<string, string | Uint8Array>, message = "change", remove: string[] = []) => {
+  const commit = async (files: Record<string, string | Uint8Array>, message = "change", remove: string[] = [], author = bot) => {
     for (const [name, body] of Object.entries(files)) {
       await mkdir(path.dirname(path.join(root, name)), { recursive: true })
       await writeFile(path.join(root, name), body)
       await git(root, "add", "--", name)
     }
     for (const name of remove) await git(root, "rm", "-q", "--", name)
-    await git(root, ...bot, "commit", "-q", "-m", message)
+    await git(root, ...author, "commit", "-q", "-m", message)
   }
-  const scan = async (config = { privateHostnames: [] as string[] }) => {
-    const repository: PushRepository = { repo: "example/public", gitRoot: root, branch: "main", localSha: await git(root, "rev-parse", "HEAD") }
-    const plan = await resolvePushPlan(repository, false)
+  const preparePush = async (branch: string, allowAnyAuthor: boolean, defaultBranch?: string) => {
+    const repository: PushRepository = { repo: "example/public", gitRoot: root, branch, localSha: await git(root, "rev-parse", branch) }
+    return { repository, plan: await resolvePushPlan(repository, allowAnyAuthor, defaultBranch) }
+  }
+  const scan = async (config = { privateHostnames: [] as string[] }, branch = "main", allowAnyAuthor = false, defaultBranch?: string) => {
+    const { repository, plan } = await preparePush(branch, allowAnyAuthor, defaultBranch)
     const rules = rulesFor(config)
     const patches = await readOutgoingPatches(repository, plan)
     return patches.flatMap((p) => [...scanMessage(p.commit, p.message, rules), ...scanPatch({ commit: p.commit, patch: p.patch }, rules)])
   }
-  return { root, commit, scan, git: (...a: string[]) => git(root, ...a) }
+  return { root, commit, preparePush, scan, git: (...a: string[]) => git(root, ...a) }
+}
+
+const publishedFeature = async () => {
+  const f = await fixture()
+  const origin = path.join(f.root, ".git", "fixture-origin.git")
+  await f.git("init", "-q", "--bare", origin)
+  await f.git("remote", "add", "origin", origin)
+  await f.git("checkout", "-qb", "feature")
+  await f.commit({ "README.md": "# feature\n" })
+  const oldSha = await f.git("rev-parse", "HEAD")
+  await f.git("push", "-q", "origin", "feature")
+  await f.git("checkout", "-q", "main")
+  await f.commit({ ".pi/published.json": "{}\n" }, "published agent config", [], [
+    "-c", "user.name=Other Author", "-c", "user.email=other@example.com",
+  ])
+  await f.git("push", "-q", "origin", "main")
+  await f.git("checkout", "-q", "feature")
+  return { ...f, oldSha }
 }
 
 const rulesOf = (findings: readonly GuardFinding[]) => findings.map((f) => `${f.rule} ${f.file}${f.line ? `:${f.line}` : ""}`).sort()
@@ -204,6 +225,84 @@ describe("public push guard on real git fixtures", () => {
     } finally {
       delete process.env.SHITRAT_PUBLIC_PUSH_ALLOW_LOG
     }
+  })
+})
+
+describe("public push guard after merging origin/main", () => {
+  test("scans only the unpublished merge and preserves the branch update range", async () => {
+    const f = await publishedFeature()
+    await f.git(...bot, "merge", "-q", "--no-edit", "origin/main")
+    const newSha = await f.git("rev-parse", "HEAD")
+    const { plan } = await f.preparePush("feature", false, "main")
+    expect(plan.commits.map(({ sha }) => sha)).toEqual([newSha])
+    expect(plan).toMatchObject({ oldSha: f.oldSha, newSha, range: `${f.oldSha}..${newSha}` })
+    expect(judge(await f.scan(undefined, "feature", false, "main"), []).blocking).toEqual([])
+  })
+
+  test("still blocks a new local commit", async () => {
+    const f = await publishedFeature()
+    await f.git(...bot, "merge", "-q", "--no-edit", "origin/main")
+    await f.commit({ ".pi/local.json": "{}\n" })
+    const commit = await f.git("rev-parse", "HEAD")
+    const { blocking } = judge(await f.scan(undefined, "feature", true, "main"), [])
+    expect(blocking.map(({ commit, rule, file }) => ({ commit, rule, file }))).toEqual([
+      { commit, rule: "agent-state", file: ".pi/local.json" },
+    ])
+  })
+
+  test("still blocks a file introduced during merge resolution", async () => {
+    const f = await publishedFeature()
+    await f.git("checkout", "-q", "main")
+    await f.commit({ "README.md": "# main\n" })
+    await f.git("push", "-q", "origin", "main")
+    await f.git("checkout", "-q", "feature")
+    await expect(f.git(...bot, "merge", "--no-edit", "origin/main")).rejects.toThrow()
+    expect(await f.git("diff", "--name-only", "--diff-filter=U")).toBe("README.md")
+    await f.commit({ "README.md": "# feature\n", ".pi/resolution.json": "{}\n" }, "resolve merge")
+    const commit = await f.git("rev-parse", "HEAD")
+    const { blocking } = judge(await f.scan(undefined, "feature", true, "main"), [])
+    expect(blocking.map(({ commit, rule, file }) => ({ commit, rule, file }))).toEqual([
+      { commit, rule: "agent-state", file: ".pi/resolution.json" },
+    ])
+  })
+
+  test("still blocks commits only reachable from a stale origin ref on a new branch", async () => {
+    const f = await publishedFeature()
+    await f.git("checkout", "-qb", "release", "origin/main")
+    await f.commit({ ".pi/unpublished.json": "{}\n" })
+    const commit = await f.git("rev-parse", "HEAD")
+    await f.git("update-ref", "refs/remotes/origin/old", commit)
+    expect(await f.git("ls-remote", "--heads", "origin", "old")).toBe("")
+    const { blocking } = judge(await f.scan(undefined, "release", false, "main"), [])
+    expect(blocking.map(({ commit, rule, file }) => ({ commit, rule, file }))).toEqual([
+      { commit, rule: "agent-state", file: ".pi/unpublished.json" },
+    ])
+  })
+
+  test("a new branch scans its own commits but not merged default-branch history", async () => {
+    const f = await publishedFeature()
+    await f.git("checkout", "-qb", "release", "origin/main^")
+    await f.commit({ "release.md": "# release\n" })
+    const ownSha = await f.git("rev-parse", "HEAD")
+    await f.git("update-ref", "refs/remotes/origin/previous-release", ownSha)
+    await f.git(...bot, "merge", "-q", "--no-edit", "origin/main")
+    const newSha = await f.git("rev-parse", "HEAD")
+    const { plan } = await f.preparePush("release", false, "main")
+    expect(plan.commits.map(({ sha }) => sha)).toEqual([ownSha, newSha])
+    expect(plan.range).toBe(`${"0".repeat(40)}..${newSha}`)
+  })
+
+  test("scans more when the default branch cannot be verified", async () => {
+    const f = await publishedFeature()
+    await f.git(...bot, "merge", "-q", "--no-edit", "origin/main")
+    const mergeSha = await f.git("rev-parse", "HEAD")
+    const mainSha = await f.git("rev-parse", "origin/main")
+    const { plan } = await f.preparePush("feature", true, "unavailable-default")
+    expect(plan.commits.map(({ sha }) => sha)).toEqual([mainSha, mergeSha])
+    await f.git("branch", "release")
+    const baseSha = await f.git("rev-parse", "origin/main^")
+    const { plan: newBranchPlan } = await f.preparePush("release", true)
+    expect(newBranchPlan.commits.map(({ sha }) => sha).sort()).toEqual([baseSha, f.oldSha, mainSha, mergeSha].sort())
   })
 })
 
