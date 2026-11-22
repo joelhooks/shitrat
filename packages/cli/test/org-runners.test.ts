@@ -2,6 +2,8 @@ import { Octokit } from "@octokit/rest"
 import { describe, expect, test } from "bun:test"
 import { ensureRunnerGroup, listOrgRunners, listRepoRunners, removeRepoRunner, listRunnerGroups, registrationToken, RunnerApiError, RunnerRateLimitError } from "../src/org-runners.js"
 
+import { changeRunnerLabels, readRunnerLabels } from "../src/runner-labels.js"
+
 const repo = { id: 42, full_name: "example/project", private: true }
 const group = { id: 7, name: "isolated", visibility: "selected", allows_public_repositories: false }
 const runner = { id: 10, name: "ci-1", status: "online", busy: false, labels: [{ name: "linux" }] }
@@ -33,6 +35,56 @@ const base = (existing: boolean): Record<string, Reply> => ({
 })
 const input = { org: "example", name: "isolated", repo: "example/project", dryRun: false }
 const writes = (calls: ReturnType<typeof github>["calls"]) => calls.filter(({ route }) => !route.startsWith("GET "))
+
+describe("org runner label metadata", () => {
+  const target = { org: "example", id: 10 }
+  const url = "/orgs/example/actions/runners/10/labels"
+  const builtIn = { id: 1, name: "Linux", type: "read-only" } as const
+  const previous = { id: 2, name: "old label", type: "custom" } as const
+  const extra = { id: 3, name: "stays", type: "custom" }
+  const next = { id: 4, name: "ci-large", type: "custom" }
+  const read = (labels: unknown[]) => ({ body: { total_count: labels.length, labels } })
+
+  test("reads label types without any other endpoint", async () => {
+    const gh = github({ [`GET ${url}`]: read([builtIn, previous]) })
+    expect(await readRunnerLabels(gh.octokit, target)).toEqual([builtIn, previous])
+    expect(gh.calls.map(({ route }) => route)).toEqual([`GET ${url}`])
+  })
+
+  test("previews metadata-only requests without --yes", async () => {
+    const gh = github({ [`GET ${url}`]: read([builtIn, previous]) })
+    expect(await changeRunnerLabels(gh.octokit, { ...target, action: "remove", labels: ["old label"] })).toMatchObject({
+      dry_run: true, before: [builtIn, previous], requests: [{ method: "DELETE", endpoint: `${url}/old%20label` }],
+    })
+    expect(writes(gh.calls)).toEqual([])
+    await expect(changeRunnerLabels(gh.octokit, { ...target, action: "set", labels: ["linux"], yes: true })).rejects.toThrow("read-only")
+    expect(writes(gh.calls)).toEqual([])
+  })
+
+  test("refuses a dot segment before any HTTP so it cannot delete the runner", async () => {
+    const gh = github({})
+    await expect(changeRunnerLabels(gh.octokit, { ...target, action: "remove", labels: [".."], yes: true })).rejects.toThrow("dot-segment")
+    expect(gh.calls).toEqual([])
+  })
+
+  test("uses only label endpoints and reads back each write", async () => {
+    for (const change of [
+      { action: "add", route: `POST ${url}`, labels: [next.name], after: [builtIn, previous, extra, next], body: { labels: [next.name] } },
+      { action: "remove", route: `DELETE ${url}/old%20label`, labels: [previous.name], after: [builtIn, extra], body: undefined },
+      { action: "set", route: `PUT ${url}`, labels: [next.name], after: [builtIn, next], body: { labels: [next.name] } },
+    ] as const) {
+      const gh = github({ [`GET ${url}`]: [read([builtIn, previous, extra]), read([...change.after])], [change.route]: read([]) })
+      expect(await changeRunnerLabels(gh.octokit, { ...target, ...change, yes: true })).toMatchObject({ dry_run: false, after: [...change.after] })
+      expect(gh.calls.map(({ route }) => route)).toEqual([`GET ${url}`, change.route, `GET ${url}`])
+      expect(writes(gh.calls)[0]?.body).toEqual(change.body)
+    }
+  })
+
+  test("fails if the readback does not show the requested custom labels", async () => {
+    const gh = github({ [`GET ${url}`]: read([builtIn, previous]), [`PUT ${url}`]: read([next]) })
+    await expect(changeRunnerLabels(gh.octokit, { ...target, action: "set", labels: [next.name], yes: true })).rejects.toThrow("readback mismatch")
+  })
+})
 
 describe("runner-group", () => {
   test("creates selected-only, public-disabled access with exactly one repo id and verifies it", async () => {
@@ -183,7 +235,7 @@ describe("runner-group workflow restrictions", () => {
 
 describe("runner command adapters", () => {
   // Isolate module mocks in a child, with only fake HTTP and no credentials.
-  const run = async (command: "runner-group" | "runner-groups" | "runners" | "runner-remove", args: string[], routes: Record<string, Reply | Reply[]> = base(true)) => {
+  const run = async (command: "runner" | "runner-group" | "runner-groups" | "runners" | "runner-remove", args: string[], routes: Record<string, Reply | Reply[]> = base(true)) => {
     const script = `
       import { mock } from "bun:test";
       import { Octokit } from "@octokit/rest";
@@ -200,7 +252,7 @@ describe("runner command adapters", () => {
         return Effect.succeed(gh.octokit);
       } }));
       const commands = await import("./src/commands/runners.ts");
-      const cmd = commands.${({ "runner-group": "runnerGroupCmd", "runner-groups": "runnerGroupsCmd", runners: "runnersCmd", "runner-remove": "runnerRemoveCmd" })[command]};
+      const cmd = commands.${({ "runner-group": "runnerGroupCmd", "runner-groups": "runnerGroupsCmd", runners: "runnersCmd", "runner-remove": "runnerRemoveCmd", runner: "runnerCmd" })[command]};
       await Effect.runPromise(Command.run(cmd, { name: "test", version: "0" })(["bun", "test", ...${JSON.stringify(args)}]));
       console.error(JSON.stringify(gh.calls));
     `
@@ -208,6 +260,19 @@ describe("runner command adapters", () => {
     const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
     return { stdout, stderr, exitCode }
   }
+  test("runner labels parses --yes and otherwise previews without a write", async () => {
+    const url = "/orgs/example/actions/runners/10/labels"
+    const empty = { body: { total_count: 0, labels: [] } }
+    const updated = { body: { total_count: 1, labels: [{ name: "ci-build", type: "custom" }] } }
+    const args = ["labels", "add", "10", "ci-build", "--org", "example"]
+    const preview = await run("runner", args, { [`GET ${url}`]: empty })
+    expect(preview.exitCode).toBe(0)
+    expect(JSON.parse(preview.stdout).result).toMatchObject({ dry_run: true })
+    expect(JSON.parse(preview.stderr)).toEqual([{ route: `GET ${url}` }])
+    const confirmed = await run("runner", [...args, "--yes"], { [`GET ${url}`]: [empty, updated], [`POST ${url}`]: updated })
+    expect(confirmed.exitCode).toBe(0)
+    expect(JSON.parse(confirmed.stdout).result).toMatchObject({ dry_run: false, after: updated.body.labels })
+  })
   test("repeatable --workflow reaches dry-run policy and --all-workflows undoes it", async () => {
     const args = ["--org", "example", "--name", "isolated", "--repo", "example/project", "--dry-run"]
     const restricted = await run("runner-group", [...args, "--workflow", workflow, "--workflow", taggedWorkflow])
