@@ -192,7 +192,7 @@ describe("local git push", () => {
         repoDir: dir,
         branch: "release",
       })
-      const plan = await resolvePushPlan(repository, false)
+      const plan = await resolvePushPlan(repository, false, "main")
 
       expect(plan.commits).toHaveLength(0)
       expect(plan.nothingToPush).toBe(false)

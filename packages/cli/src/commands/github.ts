@@ -2226,8 +2226,18 @@ export const pushCmd = Command.make(
         try: () => fetchPushRefs(repository, token.token),
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
       })
+      // Unknown visibility is treated as public: a needless scan costs a moment, a leak is permanent.
+      const repoInfo = yield* Effect.tryPromise(() =>
+        octokit.rest.repos.get({ owner: repoRef.owner, repo: repoRef.repo }),
+      ).pipe(
+        Effect.map((r) => ({
+          visibility: r.data.visibility ?? (r.data.private ? "private" : "public"),
+          defaultBranch: r.data.default_branch as string | undefined,
+        })),
+        Effect.orElseSucceed(() => ({ visibility: "unknown", defaultBranch: undefined as string | undefined })),
+      )
       const plan = yield* Effect.tryPromise({
-        try: () => resolvePushPlan(repository, allowAnyAuthor),
+        try: () => resolvePushPlan(repository, allowAnyAuthor, repoInfo.defaultBranch),
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
       })
       const statusAction: NextAction = {
@@ -2252,16 +2262,6 @@ export const pushCmd = Command.make(
         return
       }
 
-      // Unknown visibility is treated as public: a needless scan costs a moment, a leak is permanent.
-      const repoInfo = yield* Effect.tryPromise(() =>
-        octokit.rest.repos.get({ owner: repoRef.owner, repo: repoRef.repo }),
-      ).pipe(
-        Effect.map((r) => ({
-          visibility: r.data.visibility ?? (r.data.private ? "private" : "public"),
-          defaultBranch: r.data.default_branch as string | undefined,
-        })),
-        Effect.orElseSucceed(() => ({ visibility: "unknown", defaultBranch: undefined as string | undefined })),
-      )
       const visibility = repoInfo.visibility
       const guard = yield* Effect.tryPromise({
         try: async () => {
