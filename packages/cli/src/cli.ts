@@ -50,6 +50,7 @@ import { deleteBranchCmd } from "./commands/delete-branch.js"
 import { cancelRunsCmd } from "./commands/cancel-runs.js"
 import { inboxCmd } from "./commands/inbox.js"
 import { xCmd } from "./commands/x.js"
+import { variablesCmd } from "./commands/variables.js"
 import { errorMessage, failure, json, success } from "./response.js"
 import { withCellCommand } from "./github-cell.js"
 
@@ -325,6 +326,7 @@ const root = Command.make("shitrat", {}, () =>
     runnerTokenCmd,
     runnerGroupCmd,
     runnerGroupsCmd,
+    variablesCmd,
     runnersCmd,
     runnerRemoveCmd,
     runnerJobsCmd,
