@@ -44,7 +44,7 @@ import {
   tagCmd,
   releaseCmd,
 } from "./commands/github.js"
-import { runnerGroupCmd, runnerGroupsCmd, runnerRemoveCmd, runnersCmd, runnerTokenCmd, runnerTokenInvoked } from "./commands/runners.js"
+import { runnerCmd, runnerGroupCmd, runnerGroupsCmd, runnerRemoveCmd, runnersCmd, runnerTokenCmd, runnerTokenInvoked } from "./commands/runners.js"
 import { runnerJobsCmd } from "./commands/runner-jobs.js"
 import { deleteBranchCmd } from "./commands/delete-branch.js"
 import { cancelRunsCmd } from "./commands/cancel-runs.js"
@@ -323,6 +323,7 @@ const root = Command.make("shitrat", {}, () =>
     rerunCmd,
     cancelRunsCmd,
     runnerTokenCmd,
+    runnerCmd,
     runnerGroupCmd,
     runnerGroupsCmd,
     runnersCmd,

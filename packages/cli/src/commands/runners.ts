@@ -1,8 +1,9 @@
-import { Command, Options } from "@effect/cli"
+import { Args, Command, Options } from "@effect/cli"
 import { Console, Effect, Option } from "effect"
 import { writeSync } from "node:fs"
 import { createOrgOctokit, ensureRunnerGroup, listOrgRunners, listRepoRunners, removeRepoRunner, listRunnerGroups, runnerWorkflowPolicy, registrationToken, RunnerApiError, RunnerRateLimitError } from "../org-runners.js"
 import { parseRepo } from "../github-app.js"
+import { changeRunnerLabels, readRunnerLabels, validateRunnerTarget } from "../runner-labels.js"
 import { failure, json, success } from "../response.js"
 
 const orgOption = Options.text("org").pipe(Options.withDescription("GitHub organization with a ShitRat App installation"))
@@ -33,6 +34,42 @@ const failureEffect = (command: string, error: unknown) => Effect.gen(function* 
     rateLimited ? "Retry later after the GitHub rate limit clears." : "Check the existing App installation and endpoint permissions. Do not add App permissions.")))
   process.exitCode = 1
 })
+
+const runnerIdArg = Args.integer({ name: "runner-id" })
+const validateTargetEffect = (org: string, id: number) =>
+  Effect.try({ try: () => validateRunnerTarget({ org, id }), catch: (error) => error })
+
+const changeLabelsCmd = (action: "add" | "remove" | "set") => Command.make(action, {
+  org: orgOption,
+  id: runnerIdArg,
+  labels: Args.text({ name: "label" }).pipe(Args.atLeast(1)),
+  yes: Options.boolean("yes"),
+}, (input) => Effect.gen(function* () {
+  yield* validateTargetEffect(input.org, input.id)
+  const octokit = yield* createOrgOctokit(input.org)
+  const result = yield* apiEffect(() => changeRunnerLabels(octokit, { ...input, action }))
+  yield* Console.log(json(success(`runner labels ${action}`, result, [{
+    command: `runner labels ${input.id} --org ${input.org}`,
+    description: "Read current runner labels",
+  }])))
+}).pipe(Effect.catchAll((error) => failureEffect(`runner labels ${action}`, error))))
+
+const runnerLabelsCmd = Command.make("labels", {
+  org: orgOption.pipe(Options.optional),
+  id: runnerIdArg.pipe(Args.optional),
+}, ({ org, id }) => Effect.gen(function* () {
+  if (Option.isNone(org) || Option.isNone(id)) return yield* failureEffect("runner labels", new RunnerApiError("runner labels requires <runner-id> and --org"))
+  const target = { org: org.value, id: id.value }
+  yield* validateTargetEffect(target.org, target.id)
+  const octokit = yield* createOrgOctokit(target.org)
+  const labels = yield* apiEffect(() => readRunnerLabels(octokit, target))
+  yield* Console.log(json(success("runner labels", { ...target, labels })))
+}).pipe(Effect.catchAll((error) => failureEffect("runner labels", error)))).pipe(
+  Command.withDescription("Read or preview changes to org runner labels without re-registering the runner"),
+  Command.withSubcommands([changeLabelsCmd("add"), changeLabelsCmd("remove"), changeLabelsCmd("set")]),
+)
+
+export const runnerCmd = Command.make("runner").pipe(Command.withSubcommands([runnerLabelsCmd]))
 
 export const runnerGroupCmd = Command.make("runner-group", {
   org: orgOption,
