@@ -91,6 +91,80 @@ export const isFailingRun = (run: { conclusion: string | null }): boolean =>
 
 export type CiVerdict = "success" | "failure" | "pending" | "none"
 
+export interface WorkflowRunRef {
+  id: number
+  workflow_id: number
+  event: string
+  check_suite_id: number | null
+  status: string | null
+  created_at: string
+}
+
+export interface Supersession {
+  workflow_run_id: number
+  superseded_by: number
+}
+
+const runOrder = (left: WorkflowRunRef, right: WorkflowRunRef): number =>
+  Date.parse(left.created_at) - Date.parse(right.created_at) || left.id - right.id
+
+// Each workflow run on a head is its own check suite, so a cancelled earlier run of a workflow keeps
+// its red rows beside the newer run's. Only the newest completed run of each workflow and event counts;
+// runs older than it are superseded. A run for another event (a merge queue run of the same workflow)
+// answers a different question, so it never replaces one. A newer run still going is kept, so the verdict reads pending.
+export const supersededCheckSuites = (runs: readonly WorkflowRunRef[]): Map<number, Supersession> => {
+  const byWorkflow = new Map<string, WorkflowRunRef[]>()
+  for (const run of runs) {
+    const key = `${run.workflow_id}\u0000${run.event}`
+    byWorkflow.set(key, [...(byWorkflow.get(key) ?? []), run])
+  }
+  const superseded = new Map<number, Supersession>()
+  for (const workflowRuns of byWorkflow.values()) {
+    const newest = workflowRuns
+      .filter((run) => run.status === "completed")
+      .reduce<WorkflowRunRef | undefined>((best, run) => (best === undefined || runOrder(run, best) > 0 ? run : best), undefined)
+    if (newest === undefined) continue
+    for (const run of workflowRuns) {
+      if (run.check_suite_id !== null && runOrder(run, newest) < 0) {
+        superseded.set(run.check_suite_id, { workflow_run_id: run.id, superseded_by: newest.id })
+      }
+    }
+  }
+  return superseded
+}
+
+const readSupersession = async (
+  octokit: GitHubOctokit,
+  ref: RepoRef,
+  sha: string,
+): Promise<{ read: true; suites: Map<number, Supersession> } | { read: false; reason: string }> => {
+  try {
+    const runs = await call(
+      () => octokit.paginate(octokit.rest.actions.listWorkflowRunsForRepo, { owner: ref.owner, repo: ref.repo, head_sha: sha, per_page: 100 }),
+      {
+        notFound: `Workflow runs for ${sha} in ${ref.owner}/${ref.repo} are not visible to the shitratgit app.`,
+        forbidden: `Dropping superseded workflow runs ${ACTIONS_READ_MISSING}`,
+      },
+    )
+    return {
+      read: true,
+      suites: supersededCheckSuites(
+        runs.map((run) => ({
+          id: run.id,
+          workflow_id: run.workflow_id,
+          event: run.event,
+          check_suite_id: run.check_suite_id ?? null,
+          status: run.status ?? null,
+          created_at: run.created_at,
+        })),
+      ),
+    }
+  } catch (error) {
+    if (error instanceof CiReadError) return { read: false, reason: error.message }
+    throw error
+  }
+}
+
 export const summarizeChecks = (runs: readonly CheckRunSummary[], statuses: readonly CommitStatusSummary[]) => {
   const byConclusion: Record<string, number> = {}
   for (const run of runs) {
@@ -146,7 +220,10 @@ export const readChecks = async (octokit: GitHubOctokit, ref: RepoRef, sha: stri
     if (next.data.statuses.length === 0) break
     statuses.push(...next.data.statuses)
   }
-  const checkRuns: CheckRunSummary[] = runs.map((run) => ({
+  const supersession = await readSupersession(octokit, ref, first.data.sha)
+  const supersededBy = (run: (typeof runs)[number]) =>
+    supersession.read && run.check_suite?.id !== undefined ? supersession.suites.get(run.check_suite.id) : undefined
+  const checkRuns: CheckRunSummary[] = runs.filter((run) => supersededBy(run) === undefined).map((run) => ({
     id: run.id,
     name: run.name,
     status: run.status,
@@ -170,6 +247,15 @@ export const readChecks = async (octokit: GitHubOctokit, ref: RepoRef, sha: stri
       total: commitStatuses.length,
       statuses: commitStatuses,
     },
+    superseded: supersession.read
+      ? {
+          read: true as const,
+          check_runs: runs.flatMap((run) => {
+            const by = supersededBy(run)
+            return by === undefined ? [] : [{ id: run.id, name: run.name, conclusion: run.conclusion ?? null, ...by }]
+          }),
+        }
+      : { read: false as const, reason: supersession.reason },
     summary: summarizeChecks(checkRuns, commitStatuses),
   }
 }
@@ -196,6 +282,7 @@ export const readPullRequestStatus = async (octokit: GitHubOctokit, ref: RepoRef
     checks: {
       sha: checks.sha,
       ...checks.summary,
+      superseded_check_runs: checks.superseded.read ? checks.superseded.check_runs.length : null,
       failing_runs: checks.check_runs
         .filter(isFailingRun)
         .map((run) => ({ id: run.id, name: run.name, conclusion: run.conclusion, html_url: run.html_url, app: run.app })),
